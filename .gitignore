@@ -1,0 +1,14 @@
+# 프로브 입력 사진 — 본인 촬영분이라도 리포에 넣지 않는다 (D-10 하드룰)
+probe/photos/
+
+# 대용량 데이터 실측 산출물
+feasibility/*.gz
+feasibility/*.jsonl
+
+# 비밀
+.env
+*.key
+
+__pycache__/
+*.pyc
+.venv/
