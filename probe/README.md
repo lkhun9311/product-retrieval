@@ -60,6 +60,15 @@ python3 probe/identify.py --list-models    # 키 유효성 + 쓸 수 있는 모�
 
 ## 3. 사진 준비 — 이게 가장 오래 걸린다
 
+### ⚠️ 촬영 전에: 아이폰은 포맷을 바꾼다
+
+**설정 > 카메라 > 포맷 > "높은 호환성"**
+
+기본값 HEIC 는 이 환경에서 **읽히지 않는다.** pillow-heif 도 변환 도구(heif-convert·ImageMagick·ffmpeg)도
+없다 [확인: 2026-09-06]. 찍은 뒤에 고치려면 번거로우니 촬영 전에 바꾼다.
+
+### 무엇을 찍나
+
 `probe/photos/` 에 **본인이 촬영한** 사진 20장. **타인이 등장하는 사진은 넣지 않는다** (D-10 하드룰).
 이 디렉터리는 `.gitignore` 되어 리포에 올라가지 않는다.
 
@@ -70,36 +79,47 @@ python3 probe/identify.py --list-models    # 키 유효성 + 쓸 수 있는 모�
 
 **정답을 아는 제품만 쓴다.** 본인이 산 물건, 영수증·주문내역이 있는 것.
 
-### manifest.json
+### manifest 는 손으로 쓰지 않는다
 
-`probe/photos/manifest.json`:
+```bash
+python3 probe/prepare.py          # 사진 스캔 → manifest 뼈대 생성 (기존 항목은 보존)
+#   ... 에디터로 difficulty · truth · manual_search 채우기 ...
+python3 probe/prepare.py --check  # 검증. 문제 있으면 exit 1
+```
+
+`prepare.py` 가 잡아주는 것: 파일 없음 · id 중복 · bbox 이미지 밖 · difficulty 오타 ·
+truth 누락 · manual_search 누락(주의) · easy/hard 표본 부족(주의) · HEIC(안내).
+
+생성되는 형태:
 
 ```json
-[
-  {
-    "id": "p01",
-    "file": "p01.jpg",
-    "bbox": [320, 180, 640, 720],
-    "difficulty": "easy",
-    "truth": {
-      "brand": "Uniqlo",
-      "model": "U Crew Neck Short Sleeve T-Shirt",
-      "url": "https://..."
-    },
-    "manual_search": { "seconds": 95, "success": true }
-  }
-]
+{
+  "id": "p01",
+  "file": "IMG_0042.jpg",
+  "_size": [3024, 4032],
+  "bbox": null,
+  "difficulty": "easy",
+  "truth": { "brand": "Uniqlo", "model": "U Crew Neck T-Shirt", "url": null },
+  "manual_search": { "seconds": 95, "success": true }
+}
 ```
 
 | 필드 | 설명 |
 |---|---|
-| `bbox` | `[x, y, 너비, 높이]` 픽셀. 제품만 감싸게. **생략 가능** (그러면 전체 이미지를 보냄) |
+| `_size` | 참고용. **EXIF 회전을 적용한 뒤** 크기다. bbox 는 이 좌표계로 적는다 |
+| `bbox` | `[x, y, 너비, 높이]`. 제품만 감싸게. `null` 이면 전체 이미지 |
 | `truth` | 정답. **identify.py 는 이 필드를 읽지 않는다.** 채점 때만 쓴다 |
 | `manual_search` | 같은 사진을 **본인이 직접 검색**했을 때 걸린 시간과 성공 여부 |
 
 `manual_search` 를 꼭 채운다. 모델이 60% 맞혀도 사람이 30초에 100% 찾으면 이식할 이유가 없다.
 
 bbox 없이 재면 **분할이 기여하는가**는 측정되지 않는다 (2단계에서 잰다).
+
+### EXIF 회전은 자동 적용된다
+
+아이폰 사진은 회전이 EXIF 에만 있다. 적용하지 않으면 모델이 **옆으로 누운 사진**을 보고,
+정확도가 떨어져도 원인을 알 수 없다. `identify.py` 와 `prepare.py` 가 둘 다 `exif_transpose` 를
+적용한다 [확인: 800x400 + Orientation=6 → 400x800].
 
 ## 4. 실행
 

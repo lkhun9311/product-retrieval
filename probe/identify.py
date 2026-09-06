@@ -25,7 +25,7 @@ import time
 from pathlib import Path
 
 import requests
-from PIL import Image
+from PIL import Image, ImageOps
 
 API_ROOT = "https://generativelanguage.googleapis.com/v1beta"
 PROBE_DIR = Path(__file__).resolve().parent
@@ -122,18 +122,41 @@ def load_manifest() -> list[dict]:
     return items
 
 
+def open_photo(path: Path) -> Image.Image:
+    """사진을 열고 EXIF 회전을 실제 픽셀에 적용한다.
+
+    아이폰 사진은 회전 정보가 EXIF 에만 있다. 이걸 적용하지 않으면 모델이 **옆으로 누운 사진**을
+    보게 되고, 정확도가 떨어져도 원인을 알 수 없다 — 조용히 나빠지는 유형이라 여기서 막는다.
+    """
+    if not path.exists():
+        die(f"사진이 없습니다: {path}")
+    try:
+        img = Image.open(path)
+    except Exception as e:
+        if path.suffix.lower() in (".heic", ".heif"):
+            die(f"HEIC 를 읽을 수 없습니다: {path.name}\n"
+                "  이 환경엔 pillow-heif 도 변환 도구도 없습니다 [확인: 2026-09-06].\n"
+                "  가장 쉬운 해결: 아이폰 설정 > 카메라 > 포맷 > '높은 호환성' 으로 바꾸고 다시 촬영\n"
+                "  (이미 찍었다면 맥/아이폰에서 JPEG 로 내보내 옮기세요)")
+        die(f"{path.name} 을 열 수 없습니다: {e}")
+    return ImageOps.exif_transpose(img).convert("RGB")
+
+
 def prepare_crop(item: dict, max_side: int = 1024) -> tuple[bytes, tuple[int, int]]:
     """manifest 의 bbox 로 자르고 긴 변을 max_side 로 줄인다.
 
     bbox 가 없으면 전체 이미지를 쓴다 — 이 경우 "분할이 기여하는가" 는 측정되지 않는다.
     """
-    src = PHOTOS_DIR / item["file"]
-    if not src.exists():
-        die(f"사진이 없습니다: {src}")
-    img = Image.open(src).convert("RGB")
+    img = open_photo(PHOTOS_DIR / item["file"])
     if bbox := item.get("bbox"):
         x, y, w, h = bbox
-        img = img.crop((x, y, x + w, y + h))
+        if w <= 0 or h <= 0:
+            die(f"{item['id']}: bbox 의 너비·높이가 0 이하입니다 — [x, y, 너비, 높이] 형식입니다")
+        crop = img.crop((x, y, x + w, y + h))
+        if crop.size[0] < 8 or crop.size[1] < 8:
+            die(f"{item['id']}: bbox 가 이미지 밖이거나 너무 작습니다 "
+                f"(원본 {img.size}, bbox {bbox} → {crop.size})")
+        img = crop
     if max(img.size) > max_side:
         scale = max_side / max(img.size)
         img = img.resize((int(img.width * scale), int(img.height * scale)), Image.LANCZOS)
