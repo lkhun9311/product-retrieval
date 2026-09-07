@@ -65,14 +65,32 @@ def build(paths: list[Path]) -> int:
                   "  손으로 고치거나 지운 뒤 다시 실행하세요. 덮어쓰지 않았습니다.", file=sys.stderr)
             return 1
 
+    # 신규 id 는 **기존 최대값 다음**에서 이어간다.
+    # 정렬 순번을 쓰면 사전순으로 앞서는 파일이 추가될 때 기존 id 와 충돌한다
+    # (b.jpg=p01 뒤 a.jpg 추가 → 둘 다 p01). 채점은 id 사전이라 서로 다른 사진이
+    # 같은 판정을 공유하게 된다.
+    used = set()
+    for it in existing.values():
+        if isinstance(it.get("id"), str):
+            used.add(it["id"])
+    next_n = 1
+
+    def new_id() -> str:
+        nonlocal next_n
+        while f"p{next_n:02d}" in used:
+            next_n += 1
+        tag = f"p{next_n:02d}"
+        used.add(tag)
+        return tag
+
     items, added = [], 0
-    for n, p in enumerate(paths, 1):
+    for p in paths:
         if p.name in existing:
             items.append(existing[p.name])
             continue
         w, h = dimensions(p)
         items.append({
-            "id": f"p{n:02d}",
+            "id": new_id(),
             "file": p.name,
             "_size": [w, h],            # 참고용. bbox 를 적을 때 범위 확인에 쓴다
             "bbox": None,               # [x, y, 너비, 높이] 또는 null (전체 이미지)

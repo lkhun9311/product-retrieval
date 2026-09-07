@@ -16,10 +16,12 @@ from __future__ import annotations
 
 import argparse
 import base64
+import hashlib
 import io
 import json
 import os
 import re
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -152,11 +154,16 @@ def prepare_crop(item: dict, max_side: int = 1024) -> tuple[bytes, tuple[int, in
         x, y, w, h = bbox
         if w <= 0 or h <= 0:
             die(f"{item['id']}: bbox 의 너비·높이가 0 이하입니다 — [x, y, 너비, 높이] 형식입니다")
-        crop = img.crop((x, y, x + w, y + h))
-        if crop.size[0] < 8 or crop.size[1] < 8:
-            die(f"{item['id']}: bbox 가 이미지 밖이거나 너무 작습니다 "
-                f"(원본 {img.size}, bbox {bbox} → {crop.size})")
-        img = crop
+        # PIL 의 crop 은 범위를 벗어나면 **검은 픽셀로 채워서** 돌려준다.
+        # 크기만 검사하면 완전히 빈 crop 이 통과한다 — 모델은 검은 사각형을 보고,
+        # 정확도가 0 이어도 원인을 알 수 없다. 좌표를 직접 검사한다.
+        iw, ih = img.size
+        if x < 0 or y < 0 or x + w > iw or y + h > ih:
+            die(f"{item['id']}: bbox 가 이미지 밖입니다 (원본 {iw}x{ih}, bbox {bbox}).\n"
+                "  python3 probe/prepare.py --check 로 전체를 먼저 검증하세요.")
+        img = img.crop((x, y, x + w, y + h))
+        if min(img.size) < 8:
+            die(f"{item['id']}: crop 이 너무 작습니다 ({img.size})")
     if max(img.size) > max_side:
         scale = max_side / max(img.size)
         img = img.resize((int(img.width * scale), int(img.height * scale)), Image.LANCZOS)
@@ -166,22 +173,51 @@ def prepare_crop(item: dict, max_side: int = 1024) -> tuple[bytes, tuple[int, in
 
 
 def extract_json(text: str) -> dict | None:
-    """응답에서 첫 JSON 객체를 꺼낸다. 그라운딩을 켜면 JSON 모드를 못 써서 필요하다."""
+    """응답에서 첫 JSON 객체를 꺼낸다. 그라운딩을 켜면 JSON 모드를 못 써서 필요하다.
+
+    **문자열 안의 중괄호를 세면 안 된다.** `{"reasoning": "로고에 { 모양"}` 같은 정상 응답이
+    파싱 실패로 버려진다 — 모델이 한국어로 이유를 쓰면 실제로 일어난다.
+    """
     text = re.sub(r"^```(?:json)?|```$", "", text.strip(), flags=re.MULTILINE).strip()
-    depth, start = 0, None
+    depth, start, in_str, esc = 0, None, False, False
     for i, ch in enumerate(text):
-        if ch == "{":
+        if in_str:
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                in_str = False
+            continue
+        if ch == '"':
+            in_str = True
+        elif ch == "{":
             if depth == 0:
                 start = i
             depth += 1
         elif ch == "}":
-            depth -= 1
-            if depth == 0 and start is not None:
-                try:
-                    return json.loads(text[start:i + 1])
-                except json.JSONDecodeError:
-                    start = None
+            if depth:
+                depth -= 1
+                if depth == 0 and start is not None:
+                    try:
+                        return json.loads(text[start:i + 1])
+                    except json.JSONDecodeError:
+                        start = None
     return None
+
+
+def sha256_of(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()[:16]
+
+
+def git_describe() -> str:
+    """사전등록 태그를 기록한다. 실행이 어느 기준에 묶였는지 나중에 확인하기 위해서다."""
+    try:
+        r = subprocess.run(["git", "describe", "--tags", "--always", "--dirty"],
+                           cwd=PROBE_DIR.parent, capture_output=True, text=True, timeout=10)
+        return r.stdout.strip() or "unknown"
+    except (OSError, subprocess.SubprocessError):
+        return "unknown"
 
 
 def identify(key: str, model: str, jpeg: bytes, grounding: bool) -> dict:
@@ -200,8 +236,13 @@ def identify(key: str, model: str, jpeg: bytes, grounding: bool) -> dict:
         body["tools"] = [{"google_search": {}}]
 
     t0 = time.monotonic()
-    r = requests.post(f"{API_ROOT}/models/{model}:generateContent",
-                      params={"key": key}, json=body, timeout=180)
+    try:
+        r = requests.post(f"{API_ROOT}/models/{model}:generateContent",
+                          params={"key": key}, json=body, timeout=180)
+    except requests.RequestException as e:
+        # 네트워크 실패도 결과다. 예외로 죽으면 앞서 성공한 건까지 전부 잃는다.
+        return {"ok": False, "http": None, "error": f"네트워크 오류: {type(e).__name__}: {e}",
+                "latency_s": round(time.monotonic() - t0, 2)}
     elapsed = time.monotonic() - t0
 
     if r.status_code != 200:
@@ -259,7 +300,24 @@ def main() -> None:
     stamp = time.strftime("%Y%m%d-%H%M%S")
     out = RESULTS_DIR / f"run-{stamp}.json"
 
-    print(f"모델 {args.model} · 그라운딩 {'ON' if grounding else 'OFF'} · {len(items)}장\n")
+    # 무엇을 무엇에 대고 쟀는지 고정한다. 이게 없으면 나중에 표본·프롬프트가 바뀌어도
+    # 같은 실행처럼 보인다 — 사전등록 태그가 입력에 묶이지 않으면 무의미하다.
+    manifest_raw = (PHOTOS_DIR / "manifest.json").read_bytes()
+    provenance = {
+        "prompt_sha": sha256_of(PROMPT.encode()),
+        "manifest_sha": sha256_of(manifest_raw),
+        "subset": args.only or "all",
+        "prereg_tag": git_describe(),
+    }
+
+    def save() -> None:
+        out.write_text(json.dumps({
+            "model": args.model, "grounding": grounding, "timestamp": stamp,
+            "n": len(results), "provenance": provenance, "results": results,
+        }, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    print(f"모델 {args.model} · 그라운딩 {'ON' if grounding else 'OFF'} · {len(items)}장")
+    print(f"사전등록 {provenance['prereg_tag']} · manifest {provenance['manifest_sha']}\n")
     results, failures = [], 0
     for n, item in enumerate(items, 1):
         jpeg, size = prepare_crop(item)
@@ -269,20 +327,18 @@ def main() -> None:
         # truth 는 결과에 넣지 않는다. 채점은 score.py 가 별도로 한다.
         results.append({"id": item["id"], "file": item["file"],
                         "difficulty": item.get("difficulty"),
+                        "photo_sha": sha256_of((PHOTOS_DIR / item["file"]).read_bytes()),
+                        "bbox": item.get("bbox"),
                         "crop_px": list(size), "crop_bytes": len(jpeg), **res})
+        save()   # 매 건마다 저장한다. 중간에 죽어도 앞선 결과를 잃지 않는다
         if res["ok"]:
             p = res.get("parsed") or {}
             print(f"{res['latency_s']}s · {p.get('brand') or '브랜드?'} / "
                   f"{p.get('model') or '모델?'} · 링크 {len(p.get('links') or [])}개")
         else:
             failures += 1
-            print(f"HTTP {res['http']}")
+            print(f"실패 (HTTP {res['http']})")
             print(f"    {res['error'][:300]}", file=sys.stderr)
-
-    out.write_text(json.dumps({
-        "model": args.model, "grounding": grounding, "timestamp": stamp,
-        "n": len(results), "results": results,
-    }, ensure_ascii=False, indent=2), encoding="utf-8")
 
     ok = len(results) - failures
     print(f"\n성공 {ok}/{len(results)} · 저장 {out}")

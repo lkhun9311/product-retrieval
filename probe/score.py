@@ -97,12 +97,31 @@ def show(res: dict, truth: dict, grounding: bool) -> None:
         print(f"         {t['url']}")
 
 
+def forced_miss(res: dict, grounding: bool) -> str | None:
+    """사람이 고를 수 없는 경우를 돌려준다. 없으면 None.
+
+    경고만 띄우면 눌러서 지나갈 수 있다 — 실제로 호출 실패도 '동일 제품' 으로 찍혔다.
+    판정 자체를 막는다.
+    """
+    if not res.get("ok"):
+        return "호출이 실패했다. 응답이 없으므로 판정 대상이 아니다"
+    if (res.get("parsed") or {}) == {} or res.get("parsed") is None:
+        return "JSON 파싱 실패. 판정할 내용이 없다"
+    if grounding and not ((res.get("parsed") or {}).get("links")):
+        return "근거 URL 이 0개다. 제품명을 댔더라도 확인 불가 = 근거 부족"
+    return None
+
+
 def judge(results: list[dict], truth: dict, prior: dict, grounding: bool) -> dict:
     rub = RUBRIC[grounding]
     verdicts = dict(prior)
     print(f"\n채점 기준: {rub['title']}\n  {rub['prompt']}")
     for res in results:
         if res["id"] in verdicts:
+            continue
+        if reason := forced_miss(res, grounding):
+            verdicts[res["id"]] = "miss"
+            print(f"\n  {res['id']}: 자동 {rub['labels']['miss']} — {reason}")
             continue
         show(res, truth, grounding)
         while True:
@@ -128,18 +147,30 @@ def report(run: dict, results: list[dict], truth: dict, verdicts: dict) -> None:
     counts = {v: 0 for v in rub["labels"]}
     for r in judged:
         counts[verdicts[r["id"]]] += 1
-    n = len(judged)
+
+    # 분모는 **실행 전체**다. 판정 안 한 건을 빼면 1건만 판정하고 100% 가 나온다.
+    n = len(results)
+    unjudged = n - len(judged)
 
     print("\n" + "=" * 68)
     print(f"  {rub['title']}")
     print(f"  {run['model']} · 그라운딩 {'ON' if grounding else 'OFF'}")
+    if prov := run.get("provenance"):
+        print(f"  사전등록 {prov.get('prereg_tag')} · manifest {prov.get('manifest_sha')} "
+              f"· 대상 {prov.get('subset')}")
     print("=" * 68)
-    print(f"  판정 {n}/{len(results)}건\n")
+    print(f"  실행 {n}건 · 판정 {len(judged)}건 · 미판정 {unjudged}건\n")
     for k, lab in rub["labels"].items():
         c = counts[k]
-        bar = "█" * round(c / n * 30)
-        print(f"  {lab:<10} {c:>3}건  {c/n*100:>5.1f}%  {bar}")
-    print(f"\n  {rub['metric']}  {counts['hit']/n*100:.1f}%   ← 핵심 지표")
+        print(f"  {lab:<10} {c:>3}건  {c/n*100:>5.1f}%  {'█' * round(c / n * 30)}")
+    if unjudged:
+        print(f"  {'미판정':<10} {unjudged:>3}건  {unjudged/n*100:>5.1f}%  "
+              f"{'░' * round(unjudged / n * 30)}")
+
+    print(f"\n  {rub['metric']}  {counts['hit']/n*100:.1f}%   ← 핵심 지표 (분모 = 실행 전체 {n})")
+    if unjudged:
+        print(f"  ⚠️  미판정 {unjudged}건이 있다. 이 수치는 **하한**이며 D-11 판정에 쓸 수 없다.")
+        print("      전부 판정한 뒤 다시 집계하세요.")
 
     # 난이도별
     for d in ("easy", "hard"):
@@ -157,30 +188,102 @@ def report(run: dict, results: list[dict], truth: dict, verdicts: dict) -> None:
         print(f"  토큰   평균 {statistics.mean(tok):.0f}/건")
         print(f"  검색   {grounded}/{len(ok)}건에서 실제 그라운딩 발생")
 
-    # 손검색 대비 — 이게 없으면 "쓸모 있는가" 를 답할 수 없다
-    manual = [(r, truth[r["id"]]["manual_search"])
-              for r in judged
-              if r["id"] in truth and truth[r["id"]].get("manual_search")]
-    if manual:
-        ms = sum(1 for _, m in manual if m.get("success"))
-        secs = [m["seconds"] for _, m in manual if m.get("seconds")]
-        auto = sum(1 for r, _ in manual if verdicts[r["id"]] == "hit")
-        print(f"\n  손검색 대비 ({len(manual)}건)")
-        print(f"    사람   {ms}/{len(manual)} 성공" + (f" · 평균 {statistics.mean(secs):.0f}초" if secs else ""))
-        print(f"    모델   {auto}/{len(manual)} 성공")
-        if grounding and auto < ms:
-            print("    → 사람보다 못하다. 이 상태로는 이식할 이유가 없다.")
+    # 기준선 대비 — 이게 없으면 "쓸모 있는가" 를 답할 수 없다.
+    # **측정하지 않은 기준선을 패배로 세지 않는다.** success 가 null 이면 비교에서 뺀다 —
+    # 안 그러면 Lens 를 안 잰 것이 "사람 0/20" 이 되어 우리 쪽에 유리하게 편향된다.
+    paired = [(r, (truth.get(r["id"]) or {}).get("manual_search") or {}) for r in judged]
+    measured = [(r, m) for r, m in paired if m.get("success") is not None]
+    missing = len(paired) - len(measured)
+
+    print(f"\n  기준선(Google Lens) 대비")
+    if measured:
+        base_ok = sum(1 for _, m in measured if m["success"])
+        secs = [m["seconds"] for _, m in measured if m.get("seconds")]
+        auto = sum(1 for r, _ in measured if verdicts[r["id"]] == "hit")
+        print(f"    Lens   {base_ok}/{len(measured)} 성공"
+              + (f" · 평균 {statistics.mean(secs):.0f}초" if secs else ""))
+        print(f"    모델   {auto}/{len(measured)} 성공")
+        # 짝별 승패 — n=20 에서 비율 차이보다 이쪽이 읽을 만하다
+        win = sum(1 for r, m in measured if verdicts[r["id"]] == "hit" and not m["success"])
+        lose = sum(1 for r, m in measured if verdicts[r["id"]] != "hit" and m["success"])
+        tie = len(measured) - win - lose
+        print(f"    짝별   승 {win} · 패 {lose} · 무 {tie}")
+        if grounding and auto < base_ok:
+            print("    → Lens 보다 못하다. 이 상태로는 이식할 이유가 없다 (D-11 중단 조건).")
     else:
-        print("\n  손검색 비교 없음 — manifest 의 manual_search 를 채우면 '쓸모 있는가' 를 답할 수 있다.")
+        print("    측정된 기준선 0건 — **비교 불가.** D-11 의 '손검색보다 낮으면 중단' 을 판정할 수 없다.")
+    if missing:
+        print(f"    ⚠️  기준선 미측정 {missing}건은 비교에서 제외했다(패배로 세지 않음).")
 
     print("\n" + "=" * 68)
 
 
+def selftest() -> int:
+    """채점기가 **실패를 실패로 찍는지** 확인한다.
+
+    "안 걸림" 과 "통과" 를 구분 못 하는 검증은 없는 것보다 나쁘다 — 있다고 믿게 만들기 때문이다.
+    그래서 일부러 나쁜 입력을 넣어 막히는지 본다. 여기서 하나라도 실패하면 채점 결과는 무효다.
+    """
+    cases = [
+        ("호출 실패는 판정 불가",
+         {"id": "x", "ok": False, "http": 500}, True, True),
+        ("Q-B: 링크 0개는 판정 불가",
+         {"id": "x", "ok": True, "parsed": {"brand": "Nike", "links": []}}, True, True),
+        ("Q-B: 링크 있으면 판정 가능",
+         {"id": "x", "ok": True, "parsed": {"brand": "Nike", "links": ["http://a"]}}, True, False),
+        ("Q-A: 링크 없어도 판정 가능",
+         {"id": "x", "ok": True, "parsed": {"category": "가방", "links": []}}, False, False),
+        ("파싱 실패는 판정 불가",
+         {"id": "x", "ok": True, "parsed": None}, False, True),
+    ]
+    failed = 0
+    print("채점기 자기검사")
+    for name, res, grounding, want_blocked in cases:
+        blocked = forced_miss(res, grounding) is not None
+        ok = blocked == want_blocked
+        failed += not ok
+        print(f"  {'OK  ' if ok else '실패'} {name}")
+
+    # 분모 검사: 20건 중 1건만 판정하면 핵심 지표가 100% 여선 안 된다
+    import io as _io
+    import contextlib
+    run = {"model": "t", "grounding": True,
+           "results": [{"id": f"p{i:02d}", "file": "f", "ok": True, "difficulty": "easy",
+                        "latency_s": 1.0, "tokens": {"total": 1},
+                        "parsed": {"links": ["http://a"]}} for i in range(20)]}
+    buf = _io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        report(run, run["results"], {}, {"p00": "hit"})
+    out = buf.getvalue()
+    denom_ok = "5.0%" in out and "미판정 19건" in out
+    failed += not denom_ok
+    print(f"  {'OK  ' if denom_ok else '실패'} 1/20 판정 시 핵심 지표가 5%(하한)로 나오는가")
+
+    # 기준선 미측정이 패배로 집계되지 않는가
+    truth = {f"p{i:02d}": {"manual_search": {"seconds": None, "success": None}} for i in range(20)}
+    buf = _io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        report(run, run["results"], truth, {f"p{i:02d}": "hit" for i in range(20)})
+    out = buf.getvalue()
+    base_ok = "측정된 기준선 0건" in out and "비교에서 제외" in out
+    failed += not base_ok
+    print(f"  {'OK  ' if base_ok else '실패'} 미측정 기준선을 패배로 세지 않는가")
+
+    print(f"\n{'통과' if not failed else f'{failed}건 실패 — 채점 결과를 신뢰하지 마세요'}")
+    return 1 if failed else 0
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description="프로브 채점")
-    ap.add_argument("run", help="results/ 안의 run-*.json 파일명")
+    ap.add_argument("run", nargs="?", help="results/ 안의 run-*.json 파일명")
     ap.add_argument("--report", action="store_true", help="판정 입력 없이 집계만")
+    ap.add_argument("--selftest", action="store_true", help="채점기가 실패를 잡는지 검사")
     args = ap.parse_args()
+
+    if args.selftest:
+        sys.exit(selftest())
+    if not args.run:
+        die("run 파일명이 필요합니다 (또는 --selftest)")
 
     run_path = RESULTS_DIR / Path(args.run).name
     if not run_path.exists():
