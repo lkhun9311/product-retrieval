@@ -280,6 +280,8 @@ def main() -> None:
     ap.add_argument("--no-grounding", action="store_true",
                     help="웹검색 없이 실행 — 그라운딩 기여도를 재려면 두 번 돌린다")
     ap.add_argument("--only", help="특정 id 하나만 실행")
+    ap.add_argument("--smoke", action="store_true",
+                    help="배관 확인용 실행. 결과에 표시되어 평가 표본과 섞이지 않는다")
     args = ap.parse_args()
 
     key = api_key()
@@ -308,6 +310,7 @@ def main() -> None:
         "manifest_sha": sha256_of(manifest_raw),
         "subset": args.only or "all",
         "prereg_tag": git_describe(),
+        "smoke": args.smoke,   # True 면 score.py 가 핵심 지표 산출을 거부한다
     }
 
     def save() -> None:
@@ -316,7 +319,8 @@ def main() -> None:
             "n": len(results), "provenance": provenance, "results": results,
         }, ensure_ascii=False, indent=2), encoding="utf-8")
 
-    print(f"모델 {args.model} · 그라운딩 {'ON' if grounding else 'OFF'} · {len(items)}장")
+    print(f"모델 {args.model} · 그라운딩 {'ON' if grounding else 'OFF'} · {len(items)}장"
+          + ("  [스모크 — 판정에 쓰지 않음]" if args.smoke else ""))
     print(f"사전등록 {provenance['prereg_tag']} · manifest {provenance['manifest_sha']}\n")
     results, failures = [], 0
     for n, item in enumerate(items, 1):

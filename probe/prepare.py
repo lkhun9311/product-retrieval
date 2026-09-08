@@ -108,7 +108,12 @@ def build(paths: list[Path]) -> int:
     return 0
 
 
-def check() -> int:
+def check(smoke: bool = False) -> int:
+    """smoke=True 면 truth·manual_search 누락을 오류가 아닌 주의로 낮춘다.
+
+    스모크는 배관 확인용이라 판정을 하지 않는다. 정답을 채우는 건 그때 낭비다.
+    대신 스모크 실행은 결과에 표시되어 평가 표본과 절대 섞이지 않는다.
+    """
     if not MANIFEST.exists():
         print(f"[실패] {MANIFEST} 가 없습니다. 먼저 인자 없이 실행하세요.", file=sys.stderr)
         return 1
@@ -145,17 +150,19 @@ def check() -> int:
 
         truth = it.get("truth") or {}
         if not truth.get("brand") and not truth.get("model"):
-            problems.append(f"{tag}: truth 가 비었음 — 정답을 모르면 표본에서 빼세요")
+            msg = f"{tag}: truth 가 비었음"
+            (warnings if smoke else problems).append(
+                msg + (" (스모크라 허용)" if smoke else " — 정답을 모르면 표본에서 빼세요"))
 
         ms = it.get("manual_search") or {}
-        if ms.get("success") is None:
-            warnings.append(f"{tag}: manual_search 없음 — '사람보다 나은가' 를 못 잰다")
+        if ms.get("success") is None and not smoke:
+            warnings.append(f"{tag}: Lens 기준선 없음 — '이길 수 있는가' 를 못 잰다")
 
     easy = sum(1 for i in items if i.get("difficulty") == "easy")
     hard = sum(1 for i in items if i.get("difficulty") == "hard")
 
     print(f"검증 {len(items)}건 — easy {easy} · hard {hard}")
-    if easy < 10 or hard < 10:
+    if not smoke and (easy < 10 or hard < 10):
         warnings.append(f"권장은 easy 10 + hard 10 (현재 {easy}/{hard}) — 표본이 작으면 결론도 약하다")
 
     for w in warnings:
@@ -167,13 +174,18 @@ def check() -> int:
         print(f"\n오류 {len(problems)}건. 고치기 전엔 실행하지 마세요.", file=sys.stderr)
         return 1
     print("\n통과. 실행 가능:")
-    print("  python3 probe/identify.py --model gemini-3.1-flash-lite --no-grounding")
+    if smoke:
+        print("  python3 probe/identify.py --model gemini-3.1-flash-lite --no-grounding --smoke")
+    else:
+        print("  python3 probe/identify.py --model gemini-3.1-flash-lite --no-grounding")
     return 0
 
 
 def main() -> None:
     ap = argparse.ArgumentParser(description="프로브 사진 준비·검증")
     ap.add_argument("--check", action="store_true", help="검증만 수행")
+    ap.add_argument("--smoke", action="store_true",
+                    help="스모크(배관 확인)용 — truth·Lens 기준선 누락을 허용")
     args = ap.parse_args()
 
     ok, bad = scan()
@@ -188,7 +200,7 @@ def main() -> None:
         print(file=sys.stderr)
 
     if args.check:
-        sys.exit(check())
+        sys.exit(check(smoke=args.smoke))
 
     if not ok:
         print(f"[실패] {PHOTOS_DIR} 에 읽을 수 있는 사진이 없습니다.", file=sys.stderr)

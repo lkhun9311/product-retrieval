@@ -159,6 +159,9 @@ def report(run: dict, results: list[dict], truth: dict, verdicts: dict) -> None:
         print(f"  사전등록 {prov.get('prereg_tag')} · manifest {prov.get('manifest_sha')} "
               f"· 대상 {prov.get('subset')}")
     print("=" * 68)
+    if (run.get("provenance") or {}).get("smoke"):
+        print("  ⚠️  스모크 실행이다. 배관 확인용이며 **판정·집계 대상이 아니다.**")
+        print("      D-11 판정에 쓰지 마라. 평가는 별도 표본으로 다시 실행한다.\n")
     print(f"  실행 {n}건 · 판정 {len(judged)}건 · 미판정 {unjudged}건\n")
     for k, lab in rub["labels"].items():
         c = counts[k]
