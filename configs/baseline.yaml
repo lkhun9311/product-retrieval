@@ -1,0 +1,7 @@
+# Baseline experiment: full-image crop, SigLIP2 embeddings, default index params.
+name: baseline
+seed: 0
+embed_model_id: google/siglip2-base-patch16-224
+crop_kind: full
+index_params: {}
+manifest_path: ~/data/product-retrieval/lrvs/manifest_lrvs.jsonl

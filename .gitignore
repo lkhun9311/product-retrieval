@@ -12,3 +12,13 @@ feasibility/*.jsonl
 __pycache__/
 *.pyc
 .venv/
+# 실행 산출물 — 저장소 루트에만 해당 (src/product_retrieval/data 같은 패키지는 무시하지 않는다)
+/artifacts/
+/data/
+/events/
+/labels/
+/reports/
+/feasibility/
+/research_notes/
+.pytest_cache/
+.ruff_cache/
