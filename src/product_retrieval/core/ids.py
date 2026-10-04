@@ -56,6 +56,18 @@ def gallery_sha(pairs: Sequence[tuple[str, str]]) -> str:
     return sha256_bytes(canonical_json(data).encode("utf-8"))
 
 
+def query_id(source: str, product_id: str, image_sha: str) -> str:
+    """Opaque query identifier: ``f"{source}:{h[:16]}"``.
+
+    ``h`` is the sha256 of the canonical JSON of ``(source, product_id, image_sha)``.
+    The truth product id is hashed in, so the id is unique per (image, product) pair
+    but does not reveal the product id to anything that sees only the query id.
+    """
+    data = {"source": source, "product_id": product_id, "image_sha": image_sha}
+    h = sha256_bytes(canonical_json(data).encode("utf-8"))
+    return f"{source}:{h[:16]}"
+
+
 def index_id(model_id: str, gallery_sha: str, params: dict[str, Any]) -> str:
     """Identify a built index by (embedding model, gallery content, build params).
 

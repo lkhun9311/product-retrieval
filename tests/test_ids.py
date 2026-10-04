@@ -4,10 +4,37 @@ from product_retrieval.core.ids import (
     crop_hash,
     gallery_sha,
     index_id,
+    query_id,
     sha256_bytes,
     sha256_file,
 )
 from product_retrieval.core.schemas import BBox, CropSpec
+
+
+def test_query_id_hides_product_id_and_has_source_prefix():
+    qid = query_id("lrvs", "48213", "a" * 64)
+    assert "48213" not in qid
+    assert qid.startswith("lrvs:")
+    assert len(qid) == len("lrvs:") + 16
+
+
+def test_query_id_deterministic():
+    assert query_id("lrvs", "48213", "a" * 64) == query_id("lrvs", "48213", "a" * 64)
+
+
+def test_query_id_distinct_for_same_image_under_different_products():
+    assert query_id("lrvs", "1", "a" * 64) != query_id("lrvs", "2", "a" * 64)
+
+
+def test_query_id_distinct_across_sources_and_images():
+    base = query_id("lrvs", "1", "a" * 64)
+    assert base != query_id("capture", "1", "a" * 64)
+    assert base != query_id("lrvs", "1", "b" * 64)
+
+
+def test_query_id_no_delimiter_collision():
+    # Canonical JSON keeps field boundaries: shifting characters between fields differs.
+    assert query_id("lrvs", "1a", "b" * 64) != query_id("lrvs", "1", "ab" + "b" * 62)
 
 
 def test_sha256_bytes_deterministic():

@@ -3,6 +3,7 @@ import json
 import pytest
 from pydantic import ValidationError
 
+from product_retrieval.core.ids import query_id
 from product_retrieval.data.manifest import (
     ManifestRow,
     iter_manifest,
@@ -105,15 +106,16 @@ def test_to_products_filters_by_split(tmp_path):
     assert [p.product_id for p in products] == ["p2"]
 
 
-def test_to_queries_one_per_query_image_with_expected_id_format():
+def test_to_queries_one_per_query_image_with_opaque_id():
     rows = [ManifestRow.model_validate(_row(product_id="100354", query=(SHA_Q1, SHA_Q2)))]
     queries = to_queries(rows)
     assert len(queries) == 2
     ids = {q.query_id for q in queries}
     assert ids == {
-        f"lrvs:100354:{SHA_Q1[:12]}",
-        f"lrvs:100354:{SHA_Q2[:12]}",
+        query_id("lrvs", "100354", SHA_Q1),
+        query_id("lrvs", "100354", SHA_Q2),
     }
+    assert all("100354" not in i for i in ids)
     for q in queries:
         assert q.truth_product_id == "100354"
         assert q.source == "lrvs"
