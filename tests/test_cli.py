@@ -323,11 +323,6 @@ def test_eval_errors_clearly_when_index_missing(tmp_path):
     assert "build-index" in result.output
 
 
-def test_simulate_stub_exits_2():
-    result = runner.invoke(app, ["simulate"])
-    assert result.exit_code == 2
-
-
 def test_train_rerank_stub_exits_2():
     result = runner.invoke(app, ["train-rerank"])
     assert result.exit_code == 2

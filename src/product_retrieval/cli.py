@@ -14,6 +14,7 @@ from product_retrieval.data.checks import check_manifest
 from product_retrieval.data.manifest import load_manifest
 from product_retrieval.data.store import ImageStore
 from product_retrieval.eval.retrieval import DEFAULT_KS
+from product_retrieval.feedback.simulate import SimulationError, run_simulate
 from product_retrieval.pipelines.build_index import run_build_index
 from product_retrieval.pipelines.evaluate import IndexNotFoundError, format_report_table, run_eval
 from product_retrieval.pipelines.selection import TestSplitAccessError
@@ -182,9 +183,24 @@ def eval_cmd(
 
 
 @app.command("simulate")
-def simulate() -> None:
-    """Run a simulated feedback policy (C4)."""
-    _not_implemented("simulate")
+def simulate(
+    rankings: Annotated[
+        Path,
+        typer.Option("--rankings", exists=True, dir_okay=False, help="rankings JSONL written by `pr eval`"),
+    ],
+    budget: Annotated[int, typer.Option("--budget", help="number of judgments (= events)")],
+    seed: Annotated[int, typer.Option("--seed", help="sampling RNG seed")],
+    out: Annotated[Path, typer.Option("--out", help="output FeedbackEvent JSONL path")],
+    exposed_k: Annotated[int, typer.Option("--exposed-k", help="candidates exposed per query")] = 20,
+    noise: Annotated[float, typer.Option("--noise", help="probability of flipping an answer")] = 0.0,
+) -> None:
+    """Run the random simulated feedback policy (C4)."""
+    try:
+        events = run_simulate(rankings, out, budget=budget, seed=seed, exposed_k=exposed_k, noise=noise)
+    except SimulationError as exc:
+        typer.echo(f"simulate: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+    typer.echo(f"wrote {len(events)} events to {out}")
 
 
 @app.command("train-rerank")
