@@ -12,6 +12,7 @@ open; ``test`` is refused unless ``final=True``, and every time it is opened wit
 from __future__ import annotations
 
 import json
+import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -59,12 +60,19 @@ def _embed_shas(
     embedder: Embedder,
     cache: EmbeddingCache,
     data_root: Path,
+    chunk_size: int = 2048,
 ) -> dict[str, np.ndarray]:
     """Embed the unique shas in ``shas_with_source``, using and filling ``cache``.
+
+    Cache-missing shas are processed ``chunk_size`` at a time: only one chunk of
+    decoded images is in memory, and each chunk is written to the cache before the
+    next starts, so a crash loses at most one chunk and a rerun skips the rest.
 
     Returns a ``{sha: vector}`` map. First-seen source wins for a sha seen under
     more than one source (shas are content-addressed and expected to agree).
     """
+    if chunk_size < 1:
+        raise ValueError(f"chunk_size must be >= 1, got {chunk_size}")
     source_by_sha: dict[str, str] = {}
     for sha, source in shas_with_source:
         source_by_sha.setdefault(sha, source)
@@ -79,16 +87,40 @@ def _embed_shas(
 
     if missing:
         stores: dict[str, ImageStore] = {}
-        images = []
-        for sha in missing:
-            source = source_by_sha[sha]
-            store = stores.setdefault(source, ImageStore(data_root, source))
-            images.append(store.open_image(sha))
-        new_vectors = embedder.embed(images)
-        cache.put_many(missing, new_vectors, crop_hash_value, embedder.model_id)
-        vector_by_sha.update(zip(missing, new_vectors, strict=True))
+        total = len(missing)
+        cached = len(shas) - total
+        done = 0
+        start = time.perf_counter()
+        for offset in range(0, total, chunk_size):
+            chunk = missing[offset : offset + chunk_size]
+            images = []
+            for sha in chunk:
+                source = source_by_sha[sha]
+                store = stores.setdefault(source, ImageStore(data_root, source))
+                images.append(store.open_image(sha))
+            new_vectors = embedder.embed(images)
+            del images  # drop decoded images before the next chunk is opened
+            cache.put_many(chunk, new_vectors, crop_hash_value, embedder.model_id)
+            vector_by_sha.update(zip(chunk, new_vectors, strict=True))
+            done += len(chunk)
+            elapsed = time.perf_counter() - start
+            rate = done / elapsed if elapsed > 0 else 0.0
+            eta = _format_eta((total - done) / rate) if rate > 0 else "?"
+            print(
+                f"embed: {done}/{total} done (cached {cached}) {rate:.1f} img/s eta {eta}",
+                file=sys.stderr,
+                flush=True,
+            )
 
     return vector_by_sha
+
+
+def _format_eta(seconds: float) -> str:
+    minutes_total = int(round(seconds / 60))
+    hours, minutes = divmod(minutes_total, 60)
+    if hours:
+        return f"{hours}h{minutes:02d}m"
+    return f"{minutes}m" if minutes else f"{int(seconds)}s"
 
 
 def run_build_index(

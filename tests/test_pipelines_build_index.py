@@ -1,13 +1,17 @@
 import io
 import json
 
+import numpy as np
 import pytest
 from PIL import Image
 
 from product_retrieval.core.config import ExperimentConfig
 from product_retrieval.core.ids import sha256_bytes
+from product_retrieval.embed.cache import EmbeddingCache
+from product_retrieval.embed.fake import FakeEmbedder
 from product_retrieval.index.flat import GalleryIndex
-from product_retrieval.pipelines.build_index import TestSplitAccessError, run_build_index
+from product_retrieval.pipelines.build_index import TestSplitAccessError, _embed_shas, run_build_index
+from product_retrieval.pipelines.selection import select_split
 
 SOURCE = "lrvs"
 
@@ -267,3 +271,105 @@ def test_test_split_access_appends_each_time(manifest_setup):
     access_log = reports_root / "test_access.jsonl"
     lines = access_log.read_text(encoding="utf-8").splitlines()
     assert len(lines) == 2
+
+
+# --- chunked embedding (_embed_shas) -------------------------------------------------
+
+
+class _CountingEmbedder(FakeEmbedder):
+    """FakeEmbedder that records batch sizes and can fail on the Nth embed call."""
+
+    def __init__(self, fail_on_call: int | None = None) -> None:
+        super().__init__()
+        self.batch_sizes: list[int] = []
+        self.fail_on_call = fail_on_call
+
+    def embed(self, images):
+        self.batch_sizes.append(len(images))
+        if self.fail_on_call is not None and len(self.batch_sizes) == self.fail_on_call:
+            raise RuntimeError("boom")
+        return super().embed(images)
+
+
+@pytest.fixture
+def many_shas(tmp_path):
+    data_root = tmp_path / "data"
+    shas = [_put_image(data_root, SOURCE, (i, 3, 7)) for i in range(5)]
+    return data_root, [(sha, SOURCE) for sha in shas]
+
+
+def _run_embed(pairs, data_root, cache_root, embedder, chunk_size):
+    return _embed_shas(pairs, "crop", embedder, EmbeddingCache(cache_root), data_root, chunk_size=chunk_size)
+
+
+@pytest.mark.parametrize("chunk_size", [1, 2, 5, 100])  # 1, non-multiple, exact multiple, > n
+def test_chunked_embedding_matches_unchunked(many_shas, tmp_path, chunk_size):
+    data_root, pairs = many_shas
+    baseline = _run_embed(pairs, data_root, tmp_path / "c_base", FakeEmbedder(), 10_000)
+    embedder = _CountingEmbedder()
+    chunked = _run_embed(pairs, data_root, tmp_path / "c_chunk", embedder, chunk_size)
+
+    assert chunked.keys() == baseline.keys()
+    for sha in baseline:
+        np.testing.assert_array_equal(chunked[sha], baseline[sha])
+    expected_calls = -(-len(pairs) // chunk_size)
+    assert len(embedder.batch_sizes) == expected_calls
+    assert max(embedder.batch_sizes) <= chunk_size
+    assert sum(embedder.batch_sizes) == len(pairs)
+    _, missing = EmbeddingCache(tmp_path / "c_chunk").get_many([s for s, _ in pairs], "crop", "fake")
+    assert missing == []
+
+
+def test_crash_mid_way_keeps_first_chunk_and_rerun_embeds_only_remainder(many_shas, tmp_path):
+    data_root, pairs = many_shas
+    cache_root = tmp_path / "cache"
+    shas = [s for s, _ in pairs]
+
+    with pytest.raises(RuntimeError, match="boom"):
+        _run_embed(pairs, data_root, cache_root, _CountingEmbedder(fail_on_call=2), 2)
+
+    _, missing = EmbeddingCache(cache_root).get_many(shas, "crop", "fake")
+    assert missing == shas[2:]  # first chunk (2 shas) survived
+
+    rerun = _CountingEmbedder()
+    result = _run_embed(pairs, data_root, cache_root, rerun, 2)
+    assert sum(rerun.batch_sizes) == 3  # only the remainder
+    baseline = _run_embed(pairs, data_root, tmp_path / "c_base", FakeEmbedder(), 10_000)
+    for sha in shas:
+        np.testing.assert_array_equal(result[sha], baseline[sha])
+
+
+def test_fully_cached_rerun_does_not_call_embedder(many_shas, tmp_path):
+    data_root, pairs = many_shas
+    _run_embed(pairs, data_root, tmp_path / "cache", FakeEmbedder(), 2)
+    embedder = _CountingEmbedder()
+    _run_embed(pairs, data_root, tmp_path / "cache", embedder, 2)
+    assert embedder.batch_sizes == []
+
+
+def test_progress_line_goes_to_stderr(many_shas, tmp_path, capsys):
+    data_root, pairs = many_shas
+    _run_embed(pairs, data_root, tmp_path / "cache", FakeEmbedder(), 2)
+    captured = capsys.readouterr()
+    lines = [line for line in captured.err.splitlines() if line.startswith("embed: ")]
+    assert len(lines) == 3
+    assert lines[-1].startswith("embed: 5/5 done (cached 0)")
+    assert "img/s" in lines[-1] and "eta" in lines[-1]
+    assert captured.out == ""
+
+
+@pytest.mark.parametrize("bad", [0, -1])
+def test_chunk_size_below_one_is_rejected(many_shas, tmp_path, bad):
+    data_root, pairs = many_shas
+    with pytest.raises(ValueError, match="chunk_size"):
+        _run_embed(pairs, data_root, tmp_path / "cache", FakeEmbedder(), bad)
+
+
+def test_train_split_is_open_without_final(manifest_setup):
+    config, tmp_path = manifest_setup
+    reports_root = tmp_path / "reports"
+
+    selection = select_split(config, "train", None, False, reports_root)
+
+    assert [p.product_id for p in selection.products] == ["p3"]
+    assert not (reports_root / "test_access.jsonl").exists()

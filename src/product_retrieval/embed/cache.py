@@ -94,6 +94,10 @@ class EmbeddingCache:
 
         existing_vectors, existing_ids = self._load(crop_hash, model_id)
         existing_set = set(existing_ids)
+        # A crash between the two renames can leave vectors.npy with extra rows that
+        # ids.jsonl doesn't list; drop them so new rows stay aligned with their ids.
+        if existing_vectors.ndim == 2 and len(existing_vectors) > len(existing_ids):
+            existing_vectors = existing_vectors[: len(existing_ids)]
 
         new_shas: list[str] = []
         new_rows: list[np.ndarray] = []
