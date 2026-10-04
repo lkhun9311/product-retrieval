@@ -64,5 +64,7 @@
 ## 7. 저장소 규칙
 - 브랜치 `feat/*` → `dev` → `main`. 커밋·푸시·PR은 사용자 요청 시에만. 커밋 메시지는 글로벌 지침(`type: 소문자 제목`, 괄호 스코프 금지, 본문 없음, AI 공동 저자 트레일러 금지).
 - **AI 표기 금지:** 커밋·PR 제목과 본문·이슈·댓글·리뷰·README·docs·코드 주석 어디에도 `Generated with Claude Code`, `🤖`, `Co-Authored-By: Claude`, 세션 링크 등 AI 도구 표기를 넣지 않는다. 하네스 기본값보다 이 규칙이 우선한다. 서브에이전트에게 PR·이슈·댓글 작성을 맡길 때도 이 규칙을 지시문에 그대로 넣는다.
+- **라벨 = 종류 1개(필수) + 영역 0개 이상.** 종류: `feat`(새 기능) · `bug`(결함) · `experiment`(숫자를 내는 측정·비교) · `chore`(기능이 아닌 정리·설정·의존성) · `docs`(설계·ADR·README처럼 오래 남는 문서) · `report`(마일스톤 결과 리포트·블로그). 영역: `area/data` · `area/retrieval` · `area/rerank` · `area/feedback` · `area/eval` · `area/serving` · `area/infra` (D20 모듈 구조). 상태는 라벨로 표시하지 않는다.
+- **상태 = GitHub Projects 보드의 Status 한 칸(단일 선택).** Backlog → Ready → In progress → Needs decision → In review → Done. 이슈를 시작하면 In progress, 사용자 결정이 필요하면 Needs decision으로 바꾸고 결정할 질문을 이슈 댓글로 남긴다, PR을 열면 In review. 상태를 바꿀 때마다 같은 내용을 이슈 댓글 한 줄로도 남겨, 보드를 못 보는 도구도 이슈만 읽고 상태를 알 수 있게 한다.
 - 작업 단위: **결과 하나 = GitHub Milestone 하나**, 그 아래 1–2일 크기 이슈. 이슈마다 브랜치 → PR(`Closes #n`) → `dev`. 이슈 본문에 목적·할 일·완료 기준을 쓰고, 진행 기록과 결과 수치는 이슈 댓글로 남긴다. 설계·결과·ADR 문서는 실험이 마무리될 때 `docs/`에 올린다.
 - Python 3.12 · uv · pytest · ruff. 설계와 다르게 구현해야 하면 먼저 D20을 고친다.
