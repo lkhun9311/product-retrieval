@@ -127,6 +127,14 @@ def test_duplicate_query_or_product_rejected():
         rnd(rows, budget=1, seed=0)
 
 
+@pytest.mark.parametrize("sim", [rnd, strat])
+def test_legacy_truth_bearing_query_id_rejected(sim):
+    rows = _big(n=3)
+    rows[1]["query_id"] = f"lrvs:{rows[1]['truth_product_id']}:0123456789ab"
+    with pytest.raises(SimulationError, match="reveals its truth product"):
+        sim(rows, budget=1, seed=0)
+
+
 def test_missing_field_rejected(tmp_path):
     src = tmp_path / "r.jsonl"
     src.write_text(json.dumps({"query_id": "q"}) + "\n")

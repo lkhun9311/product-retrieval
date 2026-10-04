@@ -90,6 +90,12 @@ def _validate(rankings: list[dict], exposed_k: int, *, require_full: bool) -> No
         if qid in seen_queries:
             raise SimulationError(f"duplicate query_id in rankings: {qid!r}")
         seen_queries.add(qid)
+        # Contract section 2: query ids must be opaque. The legacy `source:product_id:sha12`
+        # form would carry the truth into every event, so refuse it outright.
+        if row["truth_product_id"] in qid.split(":"):
+            raise SimulationError(
+                f"query_id {qid!r} reveals its truth product; regenerate rankings with opaque query ids"
+            )
         exposed = row["top_k_product_ids"][:exposed_k]
         if len(set(exposed)) != len(exposed):
             raise SimulationError(f"query {qid!r} lists a product more than once")
