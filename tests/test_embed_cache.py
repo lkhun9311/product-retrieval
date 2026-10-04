@@ -81,3 +81,19 @@ def test_put_many_no_leftover_temp_files(tmp_path):
     out_dir = cache._dir(CROP_HASH, MODEL_ID)
     leftovers = [p for p in out_dir.iterdir() if p.name.endswith(".tmp")]
     assert leftovers == []
+
+
+def test_put_many_realigns_after_crash_left_extra_vector_rows(tmp_path):
+    """Simulate a crash between the vectors.npy and ids.jsonl renames: vectors.npy has
+    extra rows that ids.jsonl doesn't list. New puts must stay aligned with their ids.
+    """
+    cache = EmbeddingCache(tmp_path)
+    cache.put_many(["a", "b"], np.stack([_vec(0), _vec(1)]), CROP_HASH, MODEL_ID)
+    vectors_path = cache._vectors_path(CROP_HASH, MODEL_ID)
+    np.save(vectors_path, np.concatenate([np.load(vectors_path), np.stack([_vec(98)])]))
+
+    cache.put_many(["c"], np.stack([_vec(2)]), CROP_HASH, MODEL_ID)
+    found, missing = cache.get_many(["a", "b", "c"], CROP_HASH, MODEL_ID)
+
+    assert missing == []
+    np.testing.assert_array_equal(found, np.stack([_vec(0), _vec(1), _vec(2)]))

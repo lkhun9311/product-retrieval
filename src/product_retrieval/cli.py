@@ -60,7 +60,12 @@ def build_index(
         typer.Option("--config", exists=True, dir_okay=False, help="experiment YAML (core.config)"),
     ],
     split: Annotated[
-        str, typer.Option("--split", help="manifest split to index: val (default) or test")
+        str,
+        typer.Option(
+            "--split",
+            help="manifest split to index: train, val (default) or test "
+            "(train and val are open; test needs --final)",
+        ),
     ] = "val",
     limit_products: Annotated[
         int | None,
@@ -112,7 +117,12 @@ def eval_cmd(
         typer.Option("--config", exists=True, dir_okay=False, help="experiment YAML (core.config)"),
     ],
     split: Annotated[
-        str, typer.Option("--split", help="manifest split to evaluate: val (default) or test")
+        str,
+        typer.Option(
+            "--split",
+            help="manifest split to evaluate: train, val (default) or test "
+            "(train and val are open; test needs --final)",
+        ),
     ] = "val",
     limit_products: Annotated[
         int | None,
