@@ -191,12 +191,15 @@ def simulate(
     budget: Annotated[int, typer.Option("--budget", help="number of judgments (= events)")],
     seed: Annotated[int, typer.Option("--seed", help="sampling RNG seed")],
     out: Annotated[Path, typer.Option("--out", help="output FeedbackEvent JSONL path")],
+    policy: Annotated[str, typer.Option("--policy", help="random | stratified")] = "stratified",
     exposed_k: Annotated[int, typer.Option("--exposed-k", help="candidates exposed per query")] = 20,
     noise: Annotated[float, typer.Option("--noise", help="probability of flipping an answer")] = 0.0,
 ) -> None:
-    """Run the random simulated feedback policy (C4)."""
+    """Run a simulated feedback policy (C4, contract c4-v3); writes <out>.summary.json too."""
     try:
-        events = run_simulate(rankings, out, budget=budget, seed=seed, exposed_k=exposed_k, noise=noise)
+        events = run_simulate(
+            rankings, out, budget=budget, seed=seed, policy=policy, exposed_k=exposed_k, noise=noise
+        )
     except SimulationError as exc:
         typer.echo(f"simulate: {exc}", err=True)
         raise typer.Exit(code=1) from exc
