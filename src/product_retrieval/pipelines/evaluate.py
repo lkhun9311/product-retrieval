@@ -51,6 +51,33 @@ class EvalResult:
     report: dict[str, Any] = field(default_factory=dict)
 
 
+def locate_index(
+    config: ExperimentConfig,
+    products: list[Any],
+    embedder: Any,
+    embedder_name: str,
+    split: str,
+    limit_products: int | None,
+    artifacts_root: Path,
+) -> tuple[str, str, Path]:
+    """Return ``(index_id, gallery_sha, index_dir)`` for the selected gallery; raise if not built."""
+    gallery_pairs = [(product.product_id, sha) for product in products for sha in product.gallery_shas]
+    params = dict(config.index_params)
+    gallery_sha_value = compute_gallery_sha(gallery_pairs)
+    expected_index_id = compute_index_id(embedder.model_id, gallery_sha_value, params)
+
+    index_dir = artifacts_root / "index" / expected_index_id
+    if not (index_dir / "faiss.index").is_file():
+        final_flag = " --final" if split == "test" else ""
+        limit_flag = f" --limit-products {limit_products}" if limit_products is not None else ""
+        raise IndexNotFoundError(
+            f"no index found at {index_dir} (expected index_id={expected_index_id!r} for this "
+            f"config/split/limit-products). Run `pr build-index --config <config> --split {split}"
+            f"{limit_flag}{final_flag} --embedder {embedder_name}` first."
+        )
+    return expected_index_id, gallery_sha_value, index_dir
+
+
 def run_eval(
     config: ExperimentConfig,
     split: str,
@@ -81,20 +108,9 @@ def run_eval(
     crop_hash_value = compute_crop_hash(CropSpec(kind="full"))
     embedder = _make_embedder(embedder_name, config)
 
-    gallery_pairs = [(product.product_id, sha) for product in products for sha in product.gallery_shas]
-    params = dict(config.index_params)
-    gallery_sha_value = compute_gallery_sha(gallery_pairs)
-    expected_index_id = compute_index_id(embedder.model_id, gallery_sha_value, params)
-
-    index_dir = artifacts_root / "index" / expected_index_id
-    if not (index_dir / "faiss.index").is_file():
-        final_flag = " --final" if split == "test" else ""
-        limit_flag = f" --limit-products {limit_products}" if limit_products is not None else ""
-        raise IndexNotFoundError(
-            f"no index found at {index_dir} (expected index_id={expected_index_id!r} for this "
-            f"config/split/limit-products). Run `pr build-index --config <config> --split {split}"
-            f"{limit_flag}{final_flag} --embedder {embedder_name}` first."
-        )
+    expected_index_id, gallery_sha_value, index_dir = locate_index(
+        config, products, embedder, embedder_name, split, limit_products, artifacts_root
+    )
     gallery = GalleryIndex.load(index_dir)
 
     stages: dict[str, float] = {}
@@ -204,5 +220,6 @@ __all__ = [
     "IndexNotFoundError",
     "TestSplitAccessError",
     "format_report_table",
+    "locate_index",
     "run_eval",
 ]
