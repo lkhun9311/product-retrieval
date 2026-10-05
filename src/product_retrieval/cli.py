@@ -1,4 +1,4 @@
-"""D20 section 7 CLI: `pr build-index | eval | simulate | train-rerank | gate | serve`."""
+"""D20 section 7 CLI: `pr build-index | eval | simulate | labels | train-rerank | gate | serve`."""
 
 from __future__ import annotations
 
@@ -14,6 +14,7 @@ from product_retrieval.data.checks import check_manifest
 from product_retrieval.data.manifest import load_manifest
 from product_retrieval.data.store import ImageStore
 from product_retrieval.eval.retrieval import DEFAULT_KS
+from product_retrieval.feedback.labels import LabelBuildError, run_labels
 from product_retrieval.feedback.simulate import SimulationError, run_simulate
 from product_retrieval.pipelines.build_index import run_build_index
 from product_retrieval.pipelines.evaluate import IndexNotFoundError, format_report_table, run_eval
@@ -204,6 +205,28 @@ def simulate(
         typer.echo(f"simulate: {exc}", err=True)
         raise typer.Exit(code=1) from exc
     typer.echo(f"wrote {len(events)} events to {out}")
+
+
+@app.command("labels")
+def labels(
+    events: Annotated[
+        Path,
+        typer.Option(
+            "--events", exists=True, dir_okay=False, help="FeedbackEvent JSONL (e.g. `pr simulate`)"
+        ),
+    ],
+    out: Annotated[Path, typer.Option("--out", help="output Label JSONL path")],
+) -> None:
+    """Convert feedback events to labels (C4, contract c4-labels-v1); writes <out>.report.json too."""
+    try:
+        report = run_labels(events, out)
+    except LabelBuildError as exc:
+        typer.echo(f"labels: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+    typer.echo(
+        f"wrote {report['pos'] + report['neg']} labels to {out} "
+        f"(pos={report['pos']}, neg={report['neg']}, conflicts={report['conflict_count']})"
+    )
 
 
 @app.command("train-rerank")
