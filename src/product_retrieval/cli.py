@@ -21,10 +21,16 @@ from product_retrieval.feedback.labels import LabelBuildError, run_labels
 from product_retrieval.feedback.simulate import SimulationError, run_simulate
 from product_retrieval.pipelines.build_index import run_build_index
 from product_retrieval.pipelines.cand_stats import CandStatsError, run_cand_stats
+from product_retrieval.pipelines.cand_vectors import (
+    VectorSourceError,
+    cand_stats_index_id,
+    load_candidate_vectors,
+)
 from product_retrieval.pipelines.evaluate import IndexNotFoundError, format_report_table, run_eval
 from product_retrieval.pipelines.selection import TestSplitAccessError
 from product_retrieval.rerank import v0 as rerank_v0
 from product_retrieval.rerank import v1 as rerank_v1
+from product_retrieval.rerank import v2 as rerank_v2
 from product_retrieval.rerank.v0 import RerankError
 
 app = typer.Typer(add_completion=False, help="product-retrieval command line interface")
@@ -281,15 +287,71 @@ def labels(
     )
 
 
-def _check_version(command: str, version: str, cand_stats: Path | None) -> None:
-    if version not in ("v0", "v1"):
-        raise RerankError(f"unknown --version {version!r}; expected 'v0' or 'v1'")
-    if version == "v1" and cand_stats is None:
-        raise RerankError("--version v1 requires --cand-stats")
+V2_ERRORS = (RerankError, VectorSourceError, CandStatsError, IndexNotFoundError, TestSplitAccessError)
+
+
+def _check_version(
+    command: str,
+    version: str,
+    cand_stats: Path | None,
+    v2_options: dict[str, object] | None = None,
+) -> None:
+    if version not in ("v0", "v1", "v2"):
+        raise RerankError(f"unknown --version {version!r}; expected 'v0', 'v1' or 'v2'")
+    if version in ("v1", "v2") and cand_stats is None:
+        raise RerankError(f"--version {version} requires --cand-stats")
     if version == "v0" and cand_stats is not None:
-        raise RerankError("--cand-stats is only valid with --version v1")
+        raise RerankError("--cand-stats is only valid with --version v1 or v2")
     if cand_stats is not None and not cand_stats.is_file():
         raise RerankError(f"--cand-stats {cand_stats} does not exist")
+    opts = v2_options or {}
+    if version == "v2":
+        if opts.get("config") is None or opts.get("split") is None:
+            raise RerankError("--version v2 requires --config and --split")
+        if opts["split"] not in ("train", "val"):
+            raise RerankError(f"--split must be 'train' or 'val', got {opts['split']!r}")
+        if opts.get("embedder") not in ("siglip", "fake"):
+            raise RerankError(f"unknown --embedder {opts.get('embedder')!r}; expected 'siglip' or 'fake'")
+    else:
+        given = sorted(k for k, v in opts.items() if v is not None)
+        if given:
+            raise RerankError(f"--{given[0].replace('_', '-')} is only valid with --version v2")
+
+
+def _v2_opts(config, split, embedder, artifacts_root, limit_products, version, seed) -> dict[str, object]:
+    """v2-only options; a value that is still the default under v0/v1 counts as not given."""
+    if version == "v2":
+        return {
+            "config": config,
+            "split": split,
+            "embedder": embedder,
+            "artifacts_root": artifacts_root,
+            "limit_products": limit_products,
+            "seed": seed,
+        }
+    return {
+        "config": config,
+        "split": split,
+        "limit_products": limit_products,
+        "seed": seed,
+        "embedder": None if embedder == "siglip" else embedder,
+        "artifacts_root": None if artifacts_root == Path("artifacts") else artifacts_root,
+    }
+
+
+def _v2_vector_fn(opts: dict[str, object], cand_stats: Path, query_ids: list[str]):
+    """(vector_fn, index_id, embed_model_id) from the cand-stats index; fails if the located index differs."""
+    index_id = cand_stats_index_id(rerank_v1.load_cand_stats(cand_stats))
+    vectors = load_candidate_vectors(
+        load_config(opts["config"]),  # type: ignore[arg-type]
+        opts["split"],  # type: ignore[arg-type]
+        sorted(set(query_ids)),
+        expected_index_id=index_id,
+        embedder_name=opts["embedder"],  # type: ignore[arg-type]
+        artifacts_root=opts["artifacts_root"],  # type: ignore[arg-type]
+        limit_products=opts["limit_products"],  # type: ignore[arg-type]
+    )
+    return vectors.pair, index_id, vectors.embed_model_id
 
 
 @app.command("train-rerank")
@@ -306,20 +368,51 @@ def train_rerank(
     out_root: Annotated[Path, typer.Option("--out-root", help="root for reranker artifacts")] = Path(
         "artifacts/rerank"
     ),
-    version: Annotated[str, typer.Option("--version", help="reranker version: v0 (default) or v1")] = "v0",
+    version: Annotated[
+        str, typer.Option("--version", help="reranker version: v0 (default), v1 or v2")
+    ] = "v0",
     cand_stats: Annotated[
         Path | None,
         typer.Option("--cand-stats", help="cand-stats JSONL from `pr cand-stats` (v1 only, required)"),
     ] = None,
+    config: Annotated[
+        Path | None,
+        typer.Option("--config", exists=True, dir_okay=False, help="experiment YAML (v2 only, required)"),
+    ] = None,
+    split: Annotated[
+        str | None, typer.Option("--split", help="split the rankings were made on: train or val (v2 only)")
+    ] = None,
+    embedder: Annotated[
+        str, typer.Option("--embedder", help="embedder: siglip (default) or fake (v2 only)")
+    ] = "siglip",
+    artifacts_root: Annotated[
+        Path, typer.Option("--artifacts-root", help="root for embeddings/index artifacts (v2 only)")
+    ] = Path("artifacts"),
+    limit_products: Annotated[
+        int | None, typer.Option("--limit-products", help="N given to `pr eval --limit-products` (v2 only)")
+    ] = None,
+    seed: Annotated[int | None, typer.Option("--seed", help="training seed (v2 only, default 0)")] = None,
 ) -> None:
-    """Train the logistic-regression reranker from labels (C5, contract c5-rerank-v0 / v1)."""
+    """Train the reranker from labels (C5, contract c5-rerank-v0 / v1 / v2)."""
     try:
-        _check_version("train-rerank", version, cand_stats)
-        if version == "v1":
+        opts = _v2_opts(config, split, embedder, artifacts_root, limit_products, version, seed)
+        _check_version("train-rerank", version, cand_stats, opts)
+        if version == "v2":
+            if opts["split"] != "train":
+                # c5-rerank-v2 §3: validation data never enters fitting or early stopping.
+                raise RerankError(
+                    f"train-rerank --version v2 trains on the train split only, got {opts['split']!r}"
+                )
+            lbls = rerank_v0.load_labels(labels)
+            fn, index_id, embed_id = _v2_vector_fn(opts, cand_stats, [lb.query_id for lb in lbls])
+            model = rerank_v2.run_train(
+                labels, rankings, cand_stats, out_root, fn, index_id, 0 if seed is None else seed, embed_id
+            )
+        elif version == "v1":
             model = rerank_v1.run_train(labels, rankings, cand_stats, out_root)
         else:
             model = rerank_v0.run_train(labels, rankings, out_root)
-    except RerankError as exc:
+    except V2_ERRORS as exc:
         typer.echo(f"train-rerank: {exc}", err=True)
         raise typer.Exit(code=1) from exc
     typer.echo(
@@ -335,20 +428,44 @@ def rerank(
         Path, typer.Option("--rankings", exists=True, dir_okay=False, help="rankings JSONL from `pr eval`")
     ],
     out: Annotated[Path, typer.Option("--out", help="output rankings JSONL path")],
-    version: Annotated[str, typer.Option("--version", help="reranker version: v0 (default) or v1")] = "v0",
+    version: Annotated[
+        str, typer.Option("--version", help="reranker version: v0 (default), v1 or v2")
+    ] = "v0",
     cand_stats: Annotated[
         Path | None,
         typer.Option("--cand-stats", help="cand-stats JSONL from `pr cand-stats` (v1 only, required)"),
     ] = None,
+    config: Annotated[
+        Path | None,
+        typer.Option("--config", exists=True, dir_okay=False, help="experiment YAML (v2 only, required)"),
+    ] = None,
+    split: Annotated[
+        str | None, typer.Option("--split", help="split the rankings were made on: train or val (v2 only)")
+    ] = None,
+    embedder: Annotated[
+        str, typer.Option("--embedder", help="embedder: siglip (default) or fake (v2 only)")
+    ] = "siglip",
+    artifacts_root: Annotated[
+        Path, typer.Option("--artifacts-root", help="root for embeddings/index artifacts (v2 only)")
+    ] = Path("artifacts"),
+    limit_products: Annotated[
+        int | None, typer.Option("--limit-products", help="N given to `pr eval --limit-products` (v2 only)")
+    ] = None,
 ) -> None:
-    """Re-order the top 20 of each ranking with a trained reranker (C5, contract c5-rerank-v0 / v1)."""
+    """Re-order the top 20 of each ranking with a trained reranker (C5, contract c5-rerank-v0 / v1 / v2)."""
     try:
-        _check_version("rerank", version, cand_stats)
-        if version == "v1":
+        opts = _v2_opts(config, split, embedder, artifacts_root, limit_products, version, None)
+        _check_version("rerank", version, cand_stats, opts)
+        if version == "v2":
+            fn, _, embed_id = _v2_vector_fn(
+                opts, cand_stats, [r["query_id"] for r in rerank_v0.load_rankings(rankings)]
+            )
+            n = rerank_v2.run_rerank(model, rankings, cand_stats, out, fn, embed_id)
+        elif version == "v1":
             n = rerank_v1.run_rerank(model, rankings, cand_stats, out)
         else:
             n = rerank_v0.run_rerank(model, rankings, out)
-    except RerankError as exc:
+    except V2_ERRORS as exc:
         typer.echo(f"rerank: {exc}", err=True)
         raise typer.Exit(code=1) from exc
     typer.echo(f"wrote {n} reranked rows to {out}")
