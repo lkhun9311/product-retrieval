@@ -18,6 +18,7 @@ scikit-learn version).
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from pathlib import Path
 
 import numpy as np
@@ -98,6 +99,23 @@ def load_labels(path: str | Path) -> list[Label]:
 
 def train(labels: list[Label], rankings: list[dict], rankings_sha256: str, label_version: str) -> dict:
     """Fit the reranker on labelled (query, product) rows and return the model dict."""
+    return fit_model(labels, rankings, rankings_sha256, label_version, features_for_row, CONTRACT, FEATURES)
+
+
+def fit_model(
+    labels: list[Label],
+    rankings: list[dict],
+    rankings_sha256: str,
+    label_version: str,
+    feature_fn: Callable[[dict], np.ndarray],
+    contract: str,
+    features: tuple[str, ...],
+    extra_hash: tuple[object, ...] = (),
+) -> dict:
+    """Shared fit: ``feature_fn(row)`` gives the (n, len(features)) matrix of a rankings row.
+
+    ``extra_hash`` is appended to the version hash parts (empty for v0, so v0 versions are unchanged).
+    """
     by_query = {row["query_id"]: row for row in rankings}
     if len(by_query) != len(rankings):
         raise RerankError("duplicate query_id in rankings")
@@ -118,7 +136,7 @@ def train(labels: list[Label], rankings: list[dict], rankings_sha256: str, label
         if lb.product_id not in top_ids:
             raise RerankError(f"label {pair!r} is not in the top {RERANK_DEPTH} of its ranking")
         if lb.query_id not in cache:
-            cache[lb.query_id] = features_for_row(row)
+            cache[lb.query_id] = feature_fn(row)
         x_rows.append(cache[lb.query_id][top_ids.index(lb.product_id)])
         y.append(1 if lb.kind == "pos" else 0)
         w.append(lb.weight)
@@ -131,12 +149,18 @@ def train(labels: list[Label], rankings: list[dict], rankings_sha256: str, label
     clf = LogisticRegression(**HYPERPARAMS)
     clf.fit(scaler.transform(x), np.asarray(y), sample_weight=np.asarray(w))
     version = _hash(
-        CONTRACT, label_version, rankings_sha256, list(FEATURES), HYPERPARAMS, sklearn.__version__
+        contract,
+        label_version,
+        rankings_sha256,
+        list(features),
+        HYPERPARAMS,
+        sklearn.__version__,
+        *extra_hash,
     )[:12]
     return {
-        "contract": CONTRACT,
+        "contract": contract,
         "reranker_version": version,
-        "features": list(FEATURES),
+        "features": list(features),
         "hyperparams": dict(HYPERPARAMS),
         "sklearn_version": sklearn.__version__,
         "coef": [float(c) for c in clf.coef_[0]],
@@ -168,13 +192,13 @@ def save_model(model: dict, root: str | Path) -> Path:
     return path
 
 
-def load_model(path: str | Path) -> dict:
+def load_model(path: str | Path, contract: str = CONTRACT, features: tuple[str, ...] = FEATURES) -> dict:
     try:
         model = json.loads(Path(path).read_text(encoding="utf-8"))
     except ValueError as exc:
         raise RerankError(f"{path}: invalid model json: {exc}") from exc
-    if model.get("contract") != CONTRACT or model.get("features") != list(FEATURES):
-        raise RerankError(f"{path}: not a {CONTRACT} model with features {list(FEATURES)}")
+    if model.get("contract") != contract or model.get("features") != list(features):
+        raise RerankError(f"{path}: not a {contract} model with features {list(features)}")
     return model
 
 
@@ -185,11 +209,13 @@ def logits(model: dict, x: np.ndarray) -> np.ndarray:
     return ((x - mean) / scale) @ np.asarray(model["coef"]) + model["intercept"]
 
 
-def rerank_rows(model: dict, rows: list[dict]) -> list[dict]:
+def rerank_rows(
+    model: dict, rows: list[dict], feature_fn: Callable[[dict], np.ndarray] = features_for_row
+) -> list[dict]:
     """Return new rows with the top 20 re-ordered by logit (ties keep the original order)."""
     out: list[dict] = []
     for row in rows:
-        x = features_for_row(row)
+        x = feature_fn(row)
         n = len(x)
         z = logits(model, x) if n else np.zeros(0)
         order = np.argsort(-z, kind="stable")

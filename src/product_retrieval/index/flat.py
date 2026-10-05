@@ -50,6 +50,12 @@ class GalleryIndex:
     def ntotal(self) -> int:
         return self._faiss_index.ntotal
 
+    def vectors(self) -> np.ndarray:
+        """All gallery image vectors, shape (ntotal, dim), row-aligned with ``product_ids``."""
+        if self.ntotal == 0:
+            return np.zeros((0, 0), dtype=np.float32)
+        return self._faiss_index.reconstruct_n(0, self.ntotal)
+
     def search(self, query_vecs: np.ndarray, k_products: int) -> list[list[ProductHit]]:
         """Return, for each query row, up to ``k_products`` distinct products ranked by score.
 

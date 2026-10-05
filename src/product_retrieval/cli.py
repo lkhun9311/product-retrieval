@@ -1,4 +1,7 @@
-"""D20 section 7 CLI: `pr build-index | eval | simulate | labels | train-rerank | rerank | gate | serve`."""
+"""D20 section 7 CLI.
+
+`pr build-index | eval | cand-stats | simulate | labels | train-rerank | rerank | gate | serve`.
+"""
 
 from __future__ import annotations
 
@@ -17,9 +20,12 @@ from product_retrieval.eval.retrieval import DEFAULT_KS
 from product_retrieval.feedback.labels import LabelBuildError, run_labels
 from product_retrieval.feedback.simulate import SimulationError, run_simulate
 from product_retrieval.pipelines.build_index import run_build_index
+from product_retrieval.pipelines.cand_stats import CandStatsError, run_cand_stats
 from product_retrieval.pipelines.evaluate import IndexNotFoundError, format_report_table, run_eval
 from product_retrieval.pipelines.selection import TestSplitAccessError
-from product_retrieval.rerank.v0 import RerankError, run_rerank, run_train
+from product_retrieval.rerank import v0 as rerank_v0
+from product_retrieval.rerank import v1 as rerank_v1
+from product_retrieval.rerank.v0 import RerankError
 
 app = typer.Typer(add_completion=False, help="product-retrieval command line interface")
 
@@ -184,6 +190,46 @@ def eval_cmd(
     typer.echo(format_report_table(result.report))
 
 
+@app.command("cand-stats")
+def cand_stats_cmd(
+    config: Annotated[
+        Path,
+        typer.Option("--config", exists=True, dir_okay=False, help="experiment YAML (core.config)"),
+    ],
+    split: Annotated[str, typer.Option("--split", help="split the rankings were made on: train or val")],
+    rankings: Annotated[
+        Path,
+        typer.Option("--rankings", exists=True, dir_okay=False, help="rankings JSONL written by `pr eval`"),
+    ],
+    embedder: Annotated[
+        str, typer.Option("--embedder", help="embedder to use: siglip (default) or fake")
+    ] = "siglip",
+    artifacts_root: Annotated[
+        Path, typer.Option("--artifacts-root", help="root for embeddings/index artifacts")
+    ] = Path("artifacts"),
+) -> None:
+    """Write <rankings stem>.cand_stats.jsonl, image-level candidate stats (C5, c5-rerank-v1)."""
+    if split not in ("train", "val"):
+        typer.echo(f"cand-stats: --split must be 'train' or 'val', got {split!r}", err=True)
+        raise typer.Exit(code=1)
+    if embedder not in ("siglip", "fake"):
+        typer.echo(f"cand-stats: unknown --embedder {embedder!r}; expected 'siglip' or 'fake'", err=True)
+        raise typer.Exit(code=2)
+    experiment_config = load_config(config)
+    try:
+        result = run_cand_stats(
+            experiment_config,
+            split=split,
+            rankings_path=rankings,
+            embedder_name=embedder,  # type: ignore[arg-type]
+            artifacts_root=artifacts_root,
+        )
+    except (CandStatsError, IndexNotFoundError, TestSplitAccessError) as exc:
+        typer.echo(f"cand-stats: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+    typer.echo(f"wrote {result.n_queries} rows to {result.out_path}")
+
+
 @app.command("simulate")
 def simulate(
     rankings: Annotated[
@@ -230,6 +276,17 @@ def labels(
     )
 
 
+def _check_version(command: str, version: str, cand_stats: Path | None) -> None:
+    if version not in ("v0", "v1"):
+        raise RerankError(f"unknown --version {version!r}; expected 'v0' or 'v1'")
+    if version == "v1" and cand_stats is None:
+        raise RerankError("--version v1 requires --cand-stats")
+    if version == "v0" and cand_stats is not None:
+        raise RerankError("--cand-stats is only valid with --version v1")
+    if cand_stats is not None and not cand_stats.is_file():
+        raise RerankError(f"--cand-stats {cand_stats} does not exist")
+
+
 @app.command("train-rerank")
 def train_rerank(
     labels: Annotated[
@@ -244,10 +301,19 @@ def train_rerank(
     out_root: Annotated[Path, typer.Option("--out-root", help="root for reranker artifacts")] = Path(
         "artifacts/rerank"
     ),
+    version: Annotated[str, typer.Option("--version", help="reranker version: v0 (default) or v1")] = "v0",
+    cand_stats: Annotated[
+        Path | None,
+        typer.Option("--cand-stats", help="cand-stats JSONL from `pr cand-stats` (v1 only, required)"),
+    ] = None,
 ) -> None:
-    """Train the logistic-regression reranker from labels (C5, contract c5-rerank-v0)."""
+    """Train the logistic-regression reranker from labels (C5, contract c5-rerank-v0 / v1)."""
     try:
-        model = run_train(labels, rankings, out_root)
+        _check_version("train-rerank", version, cand_stats)
+        if version == "v1":
+            model = rerank_v1.run_train(labels, rankings, cand_stats, out_root)
+        else:
+            model = rerank_v0.run_train(labels, rankings, out_root)
     except RerankError as exc:
         typer.echo(f"train-rerank: {exc}", err=True)
         raise typer.Exit(code=1) from exc
@@ -264,10 +330,19 @@ def rerank(
         Path, typer.Option("--rankings", exists=True, dir_okay=False, help="rankings JSONL from `pr eval`")
     ],
     out: Annotated[Path, typer.Option("--out", help="output rankings JSONL path")],
+    version: Annotated[str, typer.Option("--version", help="reranker version: v0 (default) or v1")] = "v0",
+    cand_stats: Annotated[
+        Path | None,
+        typer.Option("--cand-stats", help="cand-stats JSONL from `pr cand-stats` (v1 only, required)"),
+    ] = None,
 ) -> None:
-    """Re-order the top 20 of each ranking with a trained reranker (C5, contract c5-rerank-v0)."""
+    """Re-order the top 20 of each ranking with a trained reranker (C5, contract c5-rerank-v0 / v1)."""
     try:
-        n = run_rerank(model, rankings, out)
+        _check_version("rerank", version, cand_stats)
+        if version == "v1":
+            n = rerank_v1.run_rerank(model, rankings, cand_stats, out)
+        else:
+            n = rerank_v0.run_rerank(model, rankings, out)
     except RerankError as exc:
         typer.echo(f"rerank: {exc}", err=True)
         raise typer.Exit(code=1) from exc
