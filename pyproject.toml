@@ -12,6 +12,7 @@ dependencies = [
     "transformers",
     "faiss-cpu",
     "torch",
+    "scikit-learn>=1.9.1",
 ]
 
 [project.scripts]
