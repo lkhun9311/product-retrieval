@@ -1,6 +1,7 @@
 """D20 section 7 CLI.
 
-`pr build-index | eval | cand-stats | simulate | labels | train-rerank | rerank | gate | serve`.
+`pr build-index | eval | cand-stats | simulate | labels | train-rerank | rerank | curve | gate | serve`
+(plus `curve-summary`).
 """
 
 from __future__ import annotations
@@ -25,6 +26,13 @@ from product_retrieval.pipelines.cand_vectors import (
     VectorSourceError,
     cand_stats_index_id,
     load_candidate_vectors,
+)
+from product_retrieval.pipelines.curve import (
+    EXPECTED_POPULATION,
+    CurveError,
+    plan_keys,
+    run_curve,
+    summarize,
 )
 from product_retrieval.pipelines.evaluate import IndexNotFoundError, format_report_table, run_eval
 from product_retrieval.pipelines.selection import TestSplitAccessError
@@ -469,6 +477,89 @@ def rerank(
         typer.echo(f"rerank: {exc}", err=True)
         raise typer.Exit(code=1) from exc
     typer.echo(f"wrote {n} reranked rows to {out}")
+
+
+@app.command("curve")
+def curve(
+    config: Annotated[
+        Path,
+        typer.Option("--config", exists=True, dir_okay=False, help="experiment YAML (core.config)"),
+    ],
+    train_rankings: Annotated[
+        Path, typer.Option("--train-rankings", exists=True, dir_okay=False, help="train rankings JSONL")
+    ],
+    val_rankings: Annotated[
+        Path, typer.Option("--val-rankings", exists=True, dir_okay=False, help="val rankings JSONL")
+    ],
+    train_cand_stats: Annotated[
+        Path, typer.Option("--train-cand-stats", exists=True, dir_okay=False, help="train cand-stats JSONL")
+    ],
+    val_cand_stats: Annotated[
+        Path, typer.Option("--val-cand-stats", exists=True, dir_okay=False, help="val cand-stats JSONL")
+    ],
+    run_id: Annotated[
+        str | None, typer.Option("--run-id", help="run directory name; reuse it to resume")
+    ] = None,
+    out_root: Annotated[Path, typer.Option("--out-root", help="root for curve runs")] = Path("reports/curve"),
+    embedder: Annotated[
+        str, typer.Option("--embedder", help="embedder: siglip (default) or fake")
+    ] = "siglip",
+    artifacts_root: Annotated[
+        Path, typer.Option("--artifacts-root", help="root for embeddings/index artifacts")
+    ] = Path("artifacts"),
+    only_keys: Annotated[
+        int | None,
+        typer.Option(
+            "--only-keys",
+            help="smoke test: run only the first N of the 108 keys (skips the population count check)",
+        ),
+    ] = None,
+) -> None:
+    """Run the learning-curve grid on train/val (C4, contract c4-learning-curve); never opens test."""
+    try:
+        keys = None if only_keys is None else plan_keys()[: max(only_keys, 0)]
+        if keys is not None and not keys:
+            raise CurveError("--only-keys must be at least 1")
+        result = run_curve(
+            load_config(config),
+            train_rankings,
+            val_rankings,
+            train_cand_stats,
+            val_cand_stats,
+            out_root=out_root,
+            embedder=embedder,
+            artifacts_root=artifacts_root,
+            run_id=run_id,
+            keys=keys,
+            expected_population=None if only_keys is not None else EXPECTED_POPULATION,
+        )
+    except (CurveError, SimulationError, LabelBuildError, *V2_ERRORS) as exc:
+        typer.echo(f"curve: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+    typer.echo(
+        f"run {result['run_id']}: attempted {result['attempted']} "
+        f"(completed {result['completed']}, failed {result['failed']}), skipped {result['skipped']} -> "
+        f"{result['run_dir']}"
+    )
+    if result["failed"]:
+        raise typer.Exit(code=3)
+
+
+@app.command("curve-summary")
+def curve_summary(
+    run_dir: Annotated[Path, typer.Option("--run-dir", exists=True, file_okay=False, help="curve run dir")],
+) -> None:
+    """Write summary.json, table.md and curve.png for a curve run directory."""
+    try:
+        summary = summarize(run_dir)
+    except CurveError as exc:
+        typer.echo(f"curve-summary: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+    c = summary["counts"]
+    typer.echo(
+        f"completed {c['completed']} failed {c['failed']} not run {c['not_run']} of {c['planned']}; "
+        f"{summary['primary']['result']['sentence']} ({summary['primary']['result']['seed_points']})"
+    )
 
 
 @app.command("gate")
