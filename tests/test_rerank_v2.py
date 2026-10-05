@@ -91,8 +91,10 @@ class Synth:
     def fn(self, qid, pid):
         return self.q[qid], self.g[(qid, pid)]
 
-    def train(self, seed=0):
-        return v2.train(self.labels, self.rows, SHA, self.stats, CSHA, "lv1", self.fn, "idx", seed)
+    def train(self, seed=0, embed_model_id=None):
+        return v2.train(
+            self.labels, self.rows, SHA, self.stats, CSHA, "lv1", self.fn, "idx", seed, embed_model_id
+        )
 
 
 def write_jsonl(path, rows):
@@ -322,6 +324,24 @@ def test_rerank_keeps_tail_and_id_set_and_stable_ties():
         v2.rerank_rows(m, s.rows, mixed, SHA, s.fn)
 
 
+def test_rerank_refuses_another_embedding_model():
+    """Galleries may differ between splits, the embedding space may not (CLAUDE.md: no version mixing)."""
+    s = Synth("q", 40)
+    m = {**s.train(), "embed_model_id": "model-a"}
+    v2.rerank_rows(m, s.rows, s.stats, SHA, s.fn, "model-a")
+    with pytest.raises(RerankError, match="embedding model"):
+        v2.rerank_rows(m, s.rows, s.stats, SHA, s.fn, "model-b")
+    with pytest.raises(RerankError, match="embedding model"):
+        v2.rerank_rows(m, s.rows, s.stats, SHA, s.fn, None)
+
+
+def test_embed_model_id_is_recorded_and_hashed():
+    s = Synth("q", 40)
+    a, b = s.train(embed_model_id="model-a"), s.train(embed_model_id="model-b")
+    assert a["embed_model_id"] == "model-a"
+    assert a["reranker_version"] != b["reranker_version"]
+
+
 def test_vector_content_alone_lets_v2_move_the_positive_up_but_not_v1():
     train = Synth("t", 120, seed=1)
     m2 = train.train()
@@ -362,11 +382,12 @@ def _put_image(data_root, color):
 def env(tmp_path):
     data_root = tmp_path / "data"
     rows = []
-    for i in range(6):
+    for i in range(12):
+        split = "val" if i < 6 else "train"
         gallery = [_put_image(data_root, (20 * i + 5, 7 * j, 3 * i + j)) for j in range(1 + i % 3)]
         query = [_put_image(data_root, (20 * i + 6, 9 + i, 4 * i))]
         rows.append(
-            {"source": SOURCE, "product_id": f"p{i}", "split": "val", "query": query, "gallery": gallery}
+            {"source": SOURCE, "product_id": f"p{i}", "split": split, "query": query, "gallery": gallery}
         )
     manifest = tmp_path / "manifest.jsonl"
     write_jsonl(manifest, rows)
@@ -386,7 +407,11 @@ def env(tmp_path):
     run_build_index(config, split="val", embedder_name="fake", artifacts_root=art, reports_root=rep)
     ev = run_eval(config, split="val", embedder_name="fake", artifacts_root=art, reports_root=rep)
     cs = run_cand_stats(config, "val", ev.rankings_path, "fake", art)
-    rankings = [json.loads(line) for line in ev.rankings_path.read_text().splitlines()]
+    # The reranker trains on the train split only (contract §3); val is for reranking.
+    run_build_index(config, split="train", embedder_name="fake", artifacts_root=art, reports_root=rep)
+    evt = run_eval(config, split="train", embedder_name="fake", artifacts_root=art, reports_root=rep)
+    cst = run_cand_stats(config, "train", evt.rankings_path, "fake", art)
+    rankings = [json.loads(line) for line in evt.rankings_path.read_text().splitlines()]
     labels = []
     for r in rankings:
         ids = r["top_k_product_ids"]
@@ -398,11 +423,11 @@ def env(tmp_path):
         )
     lpath = tmp_path / "labels.jsonl"
     lpath.write_text("".join(lb.model_dump_json() + "\n" for lb in labels), encoding="utf-8")
-    return config, cfg, art, ev, cs, lpath, tmp_path
+    return config, cfg, art, ev, cs, lpath, tmp_path, evt, cst
 
 
 def test_load_candidate_vectors_matches_independent_computation(env):
-    config, cfg, art, ev, cs, lpath, tmp_path = env
+    config, cfg, art, ev, cs, lpath, tmp_path, _, _ = env
     rankings = [json.loads(line) for line in ev.rankings_path.read_text().splitlines()]
     qids = [r["query_id"] for r in rankings]
     cv = load_candidate_vectors(config, "val", qids, ev.index_id, "fake", art)
@@ -430,12 +455,12 @@ def test_load_candidate_vectors_matches_independent_computation(env):
 
 
 def test_cli_v2_happy_and_error_paths(env):
-    config, cfg, art, ev, cs, lpath, tmp_path = env
+    config, cfg, art, ev, cs, lpath, tmp_path, evt, cst = env
     runner = CliRunner()
     out_root = tmp_path / "rr"
-    base = ["train-rerank", "--labels", str(lpath), "--rankings", str(ev.rankings_path)]
+    base = ["train-rerank", "--labels", str(lpath), "--rankings", str(evt.rankings_path)]
     base += ["--out-root", str(out_root), "--version", "v2"]
-    good = [*base, "--config", str(cfg), "--split", "val", "--cand-stats", str(cs.out_path)]
+    good = [*base, "--config", str(cfg), "--split", "train", "--cand-stats", str(cst.out_path)]
     good += ["--embedder", "fake", "--artifacts-root", str(art), "--seed", "1"]
     res = runner.invoke(app, good)
     assert res.exit_code == 0, res.output
@@ -463,22 +488,10 @@ def test_cli_v2_happy_and_error_paths(env):
         res = runner.invoke(app, args)
         assert res.exit_code == 1 and text in res.output, res.output
 
-    fails([*base, "--split", "val", "--cand-stats", str(cs.out_path)], "requires --config")
-    fails([*base, "--config", str(cfg), "--cand-stats", str(cs.out_path)], "requires --config and --split")
-    fails([*base, "--config", str(cfg), "--split", "val"], "requires --cand-stats")
-    fails([*base, "--config", str(cfg), "--split", "test", "--cand-stats", str(cs.out_path)], "--split")
-    fails(
-        [*base, "--config", str(cfg), "--split", "val", "--cand-stats", str(cs.out_path), "--embedder", "x"],
-        "--embedder",
-    )
-    no_art = ["--artifacts-root", str(tmp_path / "none"), "--embedder", "fake"]
-    fails(
-        [*base, "--config", str(cfg), "--split", "val", "--cand-stats", str(cs.out_path), *no_art],
-        "build-index",
-    )
-    # cand-stats written for another index
-    bad = tmp_path / "bad.cand_stats.jsonl"
-    write_jsonl(bad, [{**json.loads(x), "index_id": "other"} for x in cs.out_path.read_text().splitlines()])
+    fails([*base, "--split", "train", "--cand-stats", str(cst.out_path)], "requires --config")
+    fails([*base, "--config", str(cfg), "--cand-stats", str(cst.out_path)], "requires --config and --split")
+    fails([*base, "--config", str(cfg), "--split", "train"], "requires --cand-stats")
+    # validation data never enters v2 training (contract §3)
     fails(
         [
             *base,
@@ -486,6 +499,43 @@ def test_cli_v2_happy_and_error_paths(env):
             str(cfg),
             "--split",
             "val",
+            "--cand-stats",
+            str(cs.out_path),
+            "--embedder",
+            "fake",
+        ],
+        "train split only",
+    )
+    fails([*base, "--config", str(cfg), "--split", "test", "--cand-stats", str(cs.out_path)], "--split")
+    fails(
+        [
+            *base,
+            "--config",
+            str(cfg),
+            "--split",
+            "train",
+            "--cand-stats",
+            str(cst.out_path),
+            "--embedder",
+            "x",
+        ],
+        "--embedder",
+    )
+    no_art = ["--artifacts-root", str(tmp_path / "none"), "--embedder", "fake"]
+    fails(
+        [*base, "--config", str(cfg), "--split", "train", "--cand-stats", str(cst.out_path), *no_art],
+        "build-index",
+    )
+    # cand-stats written for another index
+    bad = tmp_path / "bad.cand_stats.jsonl"
+    write_jsonl(bad, [{**json.loads(x), "index_id": "other"} for x in cst.out_path.read_text().splitlines()])
+    fails(
+        [
+            *base,
+            "--config",
+            str(cfg),
+            "--split",
+            "train",
             "--cand-stats",
             str(bad),
             "--embedder",

@@ -34,8 +34,15 @@ def _unit(v: np.ndarray) -> np.ndarray:
 class CandidateVectors:
     """``pair(query_id, product_id) -> (q, g)`` over an index and a dict of query vectors."""
 
-    def __init__(self, gallery: GalleryIndex, query_vectors: dict[str, np.ndarray], index_id: str):
+    def __init__(
+        self,
+        gallery: GalleryIndex,
+        query_vectors: dict[str, np.ndarray],
+        index_id: str,
+        embed_model_id: str | None = None,
+    ):
         self.index_id = index_id
+        self.embed_model_id = embed_model_id
         self._vecs = gallery.vectors().astype(np.float64)
         self._rows_of: dict[str, list[int]] = {}
         for i, pid in enumerate(gallery.product_ids):
@@ -92,7 +99,10 @@ def load_candidate_vectors(
     ]
     by_sha = _embed_shas(shas_with_source, crop_hash_value, embedder, cache, config.data_root)
     return CandidateVectors(
-        gallery, {qid: by_sha[queries_by_id[qid].image_sha] for qid in query_ids}, index_id
+        gallery,
+        {qid: by_sha[queries_by_id[qid].image_sha] for qid in query_ids},
+        index_id,
+        embedder.model_id,
     )
 
 

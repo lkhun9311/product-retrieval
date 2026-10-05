@@ -24,7 +24,9 @@
 - 라벨 쌍이 상위 20 밖이면 실패, pos·neg 중 하나라도 0개면 실패(v0와 같음).
 
 ## 4. 버전·저장
-- 계약 문자열 "c5-rerank-v2". 버전 = sha256(계약, label_version, 순위 파일 sha256, 통계 파일 sha256, index_id, 하이퍼파라미터, seed, torch 버전)[:12].
+- 계약 문자열 "c5-rerank-v2". 버전 = sha256(계약, label_version, 순위 파일 sha256, 통계 파일 sha256, index_id, 하이퍼파라미터, seed, torch 버전, 임베딩 모델 id)[:12].
+- 학습은 **train 분할만** 받는다(`--split val`로 학습하면 실패). 모델에 학습 임베딩 모델 id를 기록하고, 재정렬 때 임베딩 모델이 다르면 실패한다
+  (분할마다 갤러리는 달라도 되지만 임베딩 공간은 같아야 한다 — 프로젝트 규칙 "모델·인덱스 버전 혼용 금지"). (2026-10-05 리뷰 지적 반영)
 - `artifacts/rerank/{version}/`: `model.json`(설정·표준화 값·학습 기록: epoch 수, 홀드아웃 손실, 조기 종료 여부) + `weights.safetensors` 또는 `weights.pt`(state_dict만).
   같은 버전이 있으면 덮지 않고 같은지 확인한다.
 

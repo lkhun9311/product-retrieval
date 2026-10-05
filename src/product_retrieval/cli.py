@@ -340,7 +340,7 @@ def _v2_opts(config, split, embedder, artifacts_root, limit_products, version, s
 
 
 def _v2_vector_fn(opts: dict[str, object], cand_stats: Path, query_ids: list[str]):
-    """(vector_fn, index_id) from the cand-stats index; fails when the located index differs."""
+    """(vector_fn, index_id, embed_model_id) from the cand-stats index; fails if the located index differs."""
     index_id = cand_stats_index_id(rerank_v1.load_cand_stats(cand_stats))
     vectors = load_candidate_vectors(
         load_config(opts["config"]),  # type: ignore[arg-type]
@@ -351,7 +351,7 @@ def _v2_vector_fn(opts: dict[str, object], cand_stats: Path, query_ids: list[str
         artifacts_root=opts["artifacts_root"],  # type: ignore[arg-type]
         limit_products=opts["limit_products"],  # type: ignore[arg-type]
     )
-    return vectors.pair, index_id
+    return vectors.pair, index_id, vectors.embed_model_id
 
 
 @app.command("train-rerank")
@@ -398,10 +398,15 @@ def train_rerank(
         opts = _v2_opts(config, split, embedder, artifacts_root, limit_products, version, seed)
         _check_version("train-rerank", version, cand_stats, opts)
         if version == "v2":
+            if opts["split"] != "train":
+                # c5-rerank-v2 §3: validation data never enters fitting or early stopping.
+                raise RerankError(
+                    f"train-rerank --version v2 trains on the train split only, got {opts['split']!r}"
+                )
             lbls = rerank_v0.load_labels(labels)
-            fn, index_id = _v2_vector_fn(opts, cand_stats, [lb.query_id for lb in lbls])
+            fn, index_id, embed_id = _v2_vector_fn(opts, cand_stats, [lb.query_id for lb in lbls])
             model = rerank_v2.run_train(
-                labels, rankings, cand_stats, out_root, fn, index_id, 0 if seed is None else seed
+                labels, rankings, cand_stats, out_root, fn, index_id, 0 if seed is None else seed, embed_id
             )
         elif version == "v1":
             model = rerank_v1.run_train(labels, rankings, cand_stats, out_root)
@@ -452,10 +457,10 @@ def rerank(
         opts = _v2_opts(config, split, embedder, artifacts_root, limit_products, version, None)
         _check_version("rerank", version, cand_stats, opts)
         if version == "v2":
-            fn, _ = _v2_vector_fn(
+            fn, _, embed_id = _v2_vector_fn(
                 opts, cand_stats, [r["query_id"] for r in rerank_v0.load_rankings(rankings)]
             )
-            n = rerank_v2.run_rerank(model, rankings, cand_stats, out, fn)
+            n = rerank_v2.run_rerank(model, rankings, cand_stats, out, fn, embed_id)
         elif version == "v1":
             n = rerank_v1.run_rerank(model, rankings, cand_stats, out)
         else:

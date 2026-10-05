@@ -199,6 +199,7 @@ def train(
     vector_fn: VectorFn,
     index_id: str,
     seed: int = 0,
+    embed_model_id: str | None = None,
 ) -> dict:
     """Fit v2 on labelled (query, product) rows of the training split; returns the model dict.
 
@@ -240,6 +241,7 @@ def train(
         HYPERPARAMS,
         seed,
         torch.__version__,
+        embed_model_id,
     )[:12]
     return {
         "contract": CONTRACT,
@@ -255,6 +257,7 @@ def train(
         "rankings_sha256": rankings_sha256,
         "cand_stats_sha256": cand_stats_sha256,
         "index_id": index_id,
+        "embed_model_id": embed_model_id,
         "n_pos": n_pos,
         "n_neg": n_neg,
         "n_rows": len(y),
@@ -323,6 +326,7 @@ def rerank_rows(
     cand_stats: list[dict],
     rankings_sha256: str,
     vector_fn: VectorFn,
+    embed_model_id: str | None = None,
 ) -> list[dict]:
     """New rows with the top 20 re-ordered by MLP logit (stable ties), ranks 21+ unchanged.
 
@@ -333,6 +337,11 @@ def rerank_rows(
     ids = sorted({str(r.get("index_id")) for r in cand_stats})
     if len(ids) != 1:
         raise RerankError(f"cand-stats rows must carry exactly one index_id, found {ids}")
+    trained_on = model.get("embed_model_id")
+    if trained_on is not None and embed_model_id != trained_on:
+        raise RerankError(
+            f"embedding model {embed_model_id!r} differs from the reranker's training model {trained_on!r}"
+        )
     feature_fn = _feature_fn(rows, rankings_sha256, cand_stats)
     mean, scale = np.asarray(model["scaler_mean"]), np.asarray(model["scaler_scale"])
     net = build_net(model["input_dim"])
@@ -367,6 +376,7 @@ def run_train(
     vector_fn: VectorFn,
     index_id: str,
     seed: int = 0,
+    embed_model_id: str | None = None,
 ) -> dict:
     labels = load_labels(labels_path)
     versions = sorted({lb.label_version for lb in labels})
@@ -382,6 +392,7 @@ def run_train(
         vector_fn,
         index_id,
         seed,
+        embed_model_id,
     )
     path = save_model(model, out_root)
     return {**{k: v for k, v in model.items() if k != "state_dict"}, "path": str(path)}
@@ -393,6 +404,7 @@ def run_rerank(
     cand_stats_path: str | Path,
     out_path: str | Path,
     vector_fn: VectorFn,
+    embed_model_id: str | None = None,
 ) -> int:
     rankings = load_rankings(rankings_path)
     rows = rerank_rows(
@@ -401,6 +413,7 @@ def run_rerank(
         v1.load_cand_stats(cand_stats_path),
         sha256_file(rankings_path),
         vector_fn,
+        embed_model_id,
     )
     out = Path(out_path)
     out.parent.mkdir(parents=True, exist_ok=True)
