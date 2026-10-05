@@ -1,4 +1,4 @@
-"""D20 section 7 CLI: `pr build-index | eval | simulate | labels | train-rerank | gate | serve`."""
+"""D20 section 7 CLI: `pr build-index | eval | simulate | labels | train-rerank | rerank | gate | serve`."""
 
 from __future__ import annotations
 
@@ -19,6 +19,7 @@ from product_retrieval.feedback.simulate import SimulationError, run_simulate
 from product_retrieval.pipelines.build_index import run_build_index
 from product_retrieval.pipelines.evaluate import IndexNotFoundError, format_report_table, run_eval
 from product_retrieval.pipelines.selection import TestSplitAccessError
+from product_retrieval.rerank.v0 import RerankError, run_rerank, run_train
 
 app = typer.Typer(add_completion=False, help="product-retrieval command line interface")
 
@@ -230,9 +231,47 @@ def labels(
 
 
 @app.command("train-rerank")
-def train_rerank() -> None:
-    """Train the reranker from labels (C5)."""
-    _not_implemented("train-rerank")
+def train_rerank(
+    labels: Annotated[
+        Path, typer.Option("--labels", exists=True, dir_okay=False, help="Label JSONL from `pr labels`")
+    ],
+    rankings: Annotated[
+        Path,
+        typer.Option(
+            "--rankings", exists=True, dir_okay=False, help="training rankings JSONL from `pr eval`"
+        ),
+    ],
+    out_root: Annotated[Path, typer.Option("--out-root", help="root for reranker artifacts")] = Path(
+        "artifacts/rerank"
+    ),
+) -> None:
+    """Train the logistic-regression reranker from labels (C5, contract c5-rerank-v0)."""
+    try:
+        model = run_train(labels, rankings, out_root)
+    except RerankError as exc:
+        typer.echo(f"train-rerank: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+    typer.echo(
+        f"reranker_version={model['reranker_version']} "
+        f"(pos={model['n_pos']}, neg={model['n_neg']}) saved to {model['path']}"
+    )
+
+
+@app.command("rerank")
+def rerank(
+    model: Annotated[Path, typer.Option("--model", exists=True, dir_okay=False, help="model.json")],
+    rankings: Annotated[
+        Path, typer.Option("--rankings", exists=True, dir_okay=False, help="rankings JSONL from `pr eval`")
+    ],
+    out: Annotated[Path, typer.Option("--out", help="output rankings JSONL path")],
+) -> None:
+    """Re-order the top 20 of each ranking with a trained reranker (C5, contract c5-rerank-v0)."""
+    try:
+        n = run_rerank(model, rankings, out)
+    except RerankError as exc:
+        typer.echo(f"rerank: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+    typer.echo(f"wrote {n} reranked rows to {out}")
 
 
 @app.command("gate")
