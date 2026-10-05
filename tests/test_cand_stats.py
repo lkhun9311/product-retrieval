@@ -317,3 +317,48 @@ def test_test_split_is_refused_by_cli(setup):
         ],
     )
     assert res.exit_code == 2
+
+
+def test_cli_forwards_limit_products(setup):
+    """Rankings from `pr eval --limit-products N` need the same N to find their index."""
+    config, tmp_path, _, _ = setup
+    artifacts, reports = tmp_path / "artifacts_lim", tmp_path / "reports_lim"
+    run_build_index(
+        config,
+        split="val",
+        embedder_name="fake",
+        artifacts_root=artifacts,
+        reports_root=reports,
+        limit_products=2,
+    )
+    ev = run_eval(
+        config,
+        split="val",
+        embedder_name="fake",
+        artifacts_root=artifacts,
+        reports_root=reports,
+        limit_products=2,
+    )
+    cfg = tmp_path / "config_lim.yaml"
+    cfg.write_text(
+        yaml.safe_dump(
+            {
+                "name": "t",
+                "seed": 0,
+                "embed_model_id": "unused-for-fake",
+                "crop_kind": "full",
+                "index_params": {},
+                "manifest_path": str(config.manifest_path),
+                "data_root": str(config.data_root),
+            }
+        ),
+        encoding="utf-8",
+    )
+    runner = CliRunner()
+    base = ["cand-stats", "--config", str(cfg), "--split", "val", "--rankings", str(ev.rankings_path)]
+    base += ["--embedder", "fake", "--artifacts-root", str(artifacts)]
+    res = runner.invoke(app, base)  # no limit: looks for the full-split index, which was never built
+    assert res.exit_code == 1 and "build-index" in res.output
+    res = runner.invoke(app, [*base, "--limit-products", "2"])
+    assert res.exit_code == 0, res.output
+    assert len(_read(cand_stats_path(ev.rankings_path))) == len(_read(ev.rankings_path))

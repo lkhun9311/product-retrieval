@@ -207,6 +207,10 @@ def cand_stats_cmd(
     artifacts_root: Annotated[
         Path, typer.Option("--artifacts-root", help="root for embeddings/index artifacts")
     ] = Path("artifacts"),
+    limit_products: Annotated[
+        int | None,
+        typer.Option("--limit-products", help="the N given to `pr eval --limit-products` for these rankings"),
+    ] = None,
 ) -> None:
     """Write <rankings stem>.cand_stats.jsonl, image-level candidate stats (C5, c5-rerank-v1)."""
     if split not in ("train", "val"):
@@ -223,6 +227,7 @@ def cand_stats_cmd(
             rankings_path=rankings,
             embedder_name=embedder,  # type: ignore[arg-type]
             artifacts_root=artifacts_root,
+            limit_products=limit_products,
         )
     except (CandStatsError, IndexNotFoundError, TestSplitAccessError) as exc:
         typer.echo(f"cand-stats: {exc}", err=True)
