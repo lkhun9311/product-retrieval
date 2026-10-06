@@ -1,0 +1,7 @@
+# DeepFurniture (M2 stage 2): full-image crop, SigLIP2 embeddings, default index params.
+name: deepfurniture
+seed: 0
+embed_model_id: google/siglip2-base-patch16-224
+crop_kind: full
+index_params: {}
+manifest_path: ~/data/product-retrieval/deepfurniture/manifest_deepfurniture.jsonl
