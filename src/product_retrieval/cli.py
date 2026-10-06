@@ -18,7 +18,8 @@ from product_retrieval.data.checks import check_manifest
 from product_retrieval.data.deepfurniture import DeepFurnitureError, build_manifest
 from product_retrieval.data.manifest import load_manifest
 from product_retrieval.data.store import ImageStore
-from product_retrieval.eval.retrieval import DEFAULT_KS
+from product_retrieval.eval.bootstrap import paired_bootstrap
+from product_retrieval.eval.retrieval import DEFAULT_KS, QueryResult, recall_at_k
 from product_retrieval.feedback.labels import LabelBuildError, run_labels
 from product_retrieval.feedback.simulate import SimulationError, run_simulate
 from product_retrieval.pipelines.build_index import run_build_index
@@ -321,7 +322,12 @@ def cand_stats_cmd(
         Path,
         typer.Option("--config", exists=True, dir_okay=False, help="experiment YAML (core.config)"),
     ],
-    split: Annotated[str, typer.Option("--split", help="split the rankings were made on: train or val")],
+    split: Annotated[
+        str,
+        typer.Option(
+            "--split", help="split the rankings were made on: train, val or test (test needs --final)"
+        ),
+    ],
     rankings: Annotated[
         Path,
         typer.Option("--rankings", exists=True, dir_okay=False, help="rankings JSONL written by `pr eval`"),
@@ -336,10 +342,19 @@ def cand_stats_cmd(
         int | None,
         typer.Option("--limit-products", help="the N given to `pr eval --limit-products` for these rankings"),
     ] = None,
+    final: Annotated[
+        bool, typer.Option("--final", help="allow split=test; logs the access (D20 section 9)")
+    ] = False,
+    reports_root: Annotated[
+        Path, typer.Option("--reports-root", help="root for reports; the test-access log goes here")
+    ] = Path("reports"),
 ) -> None:
     """Write <rankings stem>.cand_stats.jsonl, image-level candidate stats (C5, c5-rerank-v1)."""
-    if split not in ("train", "val"):
-        typer.echo(f"cand-stats: --split must be 'train' or 'val', got {split!r}", err=True)
+    if split not in ("train", "val") and not (split == "test" and final):
+        typer.echo(
+            f"cand-stats: --split must be 'train' or 'val' (or 'test' with --final), got {split!r}",
+            err=True,
+        )
         raise typer.Exit(code=1)
     if embedder not in ("siglip", "fake"):
         typer.echo(f"cand-stats: unknown --embedder {embedder!r}; expected 'siglip' or 'fake'", err=True)
@@ -353,11 +368,90 @@ def cand_stats_cmd(
             embedder_name=embedder,  # type: ignore[arg-type]
             artifacts_root=artifacts_root,
             limit_products=limit_products,
+            final=final,
+            reports_root=reports_root,
         )
     except (CandStatsError, IndexNotFoundError, TestSplitAccessError) as exc:
         typer.echo(f"cand-stats: {exc}", err=True)
         raise typer.Exit(code=1) from exc
     typer.echo(f"wrote {result.n_queries} rows to {result.out_path}")
+
+
+def _load_query_results(path: Path) -> list[QueryResult]:
+    """QueryResult per row of a rankings JSONL (query_id, truth_product_id, top_k_product_ids)."""
+    out: list[QueryResult] = []
+    seen: set[str] = set()
+    with open(path, encoding="utf-8") as f:
+        for lineno, line in enumerate(f, start=1):
+            if not line.strip():
+                continue
+            row = json.loads(line)
+            for key in ("query_id", "truth_product_id", "top_k_product_ids"):
+                if key not in row:
+                    raise ValueError(f"{path}:{lineno}: missing field {key!r}")
+            if row["query_id"] in seen:
+                raise ValueError(f"{path}:{lineno}: duplicate query_id {row['query_id']!r}")
+            seen.add(row["query_id"])
+            out.append(QueryResult(row["query_id"], row["truth_product_id"], tuple(row["top_k_product_ids"])))
+    if not out:
+        raise ValueError(f"{path}: no rows")
+    return out
+
+
+@app.command("compare-rankings")
+def compare_rankings(
+    baseline: Annotated[
+        Path, typer.Option("--baseline", exists=True, dir_okay=False, help="rankings JSONL A")
+    ],
+    candidate: Annotated[
+        Path, typer.Option("--candidate", exists=True, dir_okay=False, help="rankings JSONL B")
+    ],
+    b: Annotated[int, typer.Option("--b", help="bootstrap replicates")] = 1000,
+    seed: Annotated[int, typer.Option("--seed", help="bootstrap seed")] = 0,
+    ks: Annotated[str, typer.Option("--ks", help="comma-separated K values")] = "1,5,10,20",
+    out: Annotated[Path | None, typer.Option("--out", help="also write the result as JSON")] = None,
+) -> None:
+    """Product-macro R@K of two rankings files and the paired bootstrap delta (candidate - baseline)."""
+    try:
+        k_values = tuple(int(x) for x in ks.split(",") if x.strip())
+        res_a = _load_query_results(baseline)
+        res_b = _load_query_results(candidate)
+        point_a = recall_at_k(res_a, k_values)
+        point_b = recall_at_k(res_b, k_values)
+        paired = paired_bootstrap(res_a, res_b, k_values, b=b, seed=seed)
+    except ValueError as exc:
+        typer.echo(f"compare-rankings: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+    rows = {
+        str(k): {
+            "baseline": point_a["macro"][k],
+            "candidate": point_b["macro"][k],
+            "delta": paired["macro"][k]["delta"],
+            "ci_low": paired["macro"][k]["ci"][0],
+            "ci_high": paired["macro"][k]["ci"][1],
+            "p_le_0": paired["macro"][k]["p_le_0"],
+        }
+        for k in k_values
+    }
+    summary = {
+        "baseline": str(baseline),
+        "candidate": str(candidate),
+        "n_queries": paired["n_queries"],
+        "n_products": paired["n_products"],
+        "b": b,
+        "seed": seed,
+        "macro": rows,
+    }
+    typer.echo(f"n_queries={summary['n_queries']} n_products={summary['n_products']} b={b} seed={seed}")
+    typer.echo("K  baseline  candidate  delta  95% CI  P(delta<=0)")
+    for k, r in rows.items():
+        typer.echo(
+            f"{k}  {r['baseline']:.4f}  {r['candidate']:.4f}  {r['delta']:+.4f}  "
+            f"[{r['ci_low']:+.4f}, {r['ci_high']:+.4f}]  {r['p_le_0']:.3f}"
+        )
+    if out is not None:
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
 
 
 @app.command("simulate")
@@ -427,8 +521,10 @@ def _check_version(
     if version == "v2":
         if opts.get("config") is None or opts.get("split") is None:
             raise RerankError("--version v2 requires --config and --split")
-        if opts["split"] not in ("train", "val"):
-            raise RerankError(f"--split must be 'train' or 'val', got {opts['split']!r}")
+        if opts["split"] not in ("train", "val") and not (opts["split"] == "test" and opts.get("final")):
+            raise RerankError(
+                f"--split must be 'train' or 'val' (or 'test' with --final), got {opts['split']!r}"
+            )
         if opts.get("embedder") not in ("siglip", "fake"):
             raise RerankError(f"unknown --embedder {opts.get('embedder')!r}; expected 'siglip' or 'fake'")
     else:
@@ -437,7 +533,17 @@ def _check_version(
             raise RerankError(f"--{given[0].replace('_', '-')} is only valid with --version v2")
 
 
-def _v2_opts(config, split, embedder, artifacts_root, limit_products, version, seed) -> dict[str, object]:
+def _v2_opts(
+    config,
+    split,
+    embedder,
+    artifacts_root,
+    limit_products,
+    version,
+    seed,
+    final=False,
+    reports_root=Path("reports"),
+) -> dict[str, object]:
     """v2-only options; a value that is still the default under v0/v1 counts as not given."""
     if version == "v2":
         return {
@@ -447,12 +553,16 @@ def _v2_opts(config, split, embedder, artifacts_root, limit_products, version, s
             "artifacts_root": artifacts_root,
             "limit_products": limit_products,
             "seed": seed,
+            "final": final,
+            "reports_root": reports_root,
         }
     return {
         "config": config,
         "split": split,
         "limit_products": limit_products,
         "seed": seed,
+        "final": True if final else None,
+        "reports_root": None if reports_root == Path("reports") else reports_root,
         "embedder": None if embedder == "siglip" else embedder,
         "artifacts_root": None if artifacts_root == Path("artifacts") else artifacts_root,
     }
@@ -469,6 +579,8 @@ def _v2_vector_fn(opts: dict[str, object], cand_stats: Path, query_ids: list[str
         embedder_name=opts["embedder"],  # type: ignore[arg-type]
         artifacts_root=opts["artifacts_root"],  # type: ignore[arg-type]
         limit_products=opts["limit_products"],  # type: ignore[arg-type]
+        reports_root=opts["reports_root"],  # type: ignore[arg-type]
+        final=bool(opts["final"]),
     )
     return vectors.pair, index_id, vectors.embed_model_id
 
@@ -570,10 +682,18 @@ def rerank(
     limit_products: Annotated[
         int | None, typer.Option("--limit-products", help="N given to `pr eval --limit-products` (v2 only)")
     ] = None,
+    final: Annotated[
+        bool, typer.Option("--final", help="allow split=test (v2 only); logs the access (D20 section 9)")
+    ] = False,
+    reports_root: Annotated[
+        Path, typer.Option("--reports-root", help="root for reports; the test-access log goes here (v2 only)")
+    ] = Path("reports"),
 ) -> None:
     """Re-order the top 20 of each ranking with a trained reranker (C5, contract c5-rerank-v0 / v1 / v2)."""
     try:
-        opts = _v2_opts(config, split, embedder, artifacts_root, limit_products, version, None)
+        opts = _v2_opts(
+            config, split, embedder, artifacts_root, limit_products, version, None, final, reports_root
+        )
         _check_version("rerank", version, cand_stats, opts)
         if version == "v2":
             fn, _, embed_id = _v2_vector_fn(
