@@ -14,7 +14,7 @@ All DeepFurniture queries are rendered. IKEA Interior gives real room photos wit
 - No split: the whole set is evaluation only. Nothing here is used for training or model choice.
 
 ## Query form
-Whole room photo, no crop (there are no boxes). This favours large items; the result is a lower bound for a system that lets the user point at one item.
+Whole room photo, no crop (there are no boxes). This favours large items. It says nothing about a system that lets the user point at one item, which is unmeasured (an earlier wording called it a lower bound; that was unsupported, since cropping can also lose useful context).
 
 ## Metrics (per room, then mean over rooms)
 - **Hit@K**: 1 if at least one correct product is in the top K, else 0.
