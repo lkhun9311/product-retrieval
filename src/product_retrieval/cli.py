@@ -15,6 +15,7 @@ import typer
 from product_retrieval import __version__
 from product_retrieval.core.config import DEFAULT_DATA_ROOT, load_config
 from product_retrieval.data.checks import check_manifest
+from product_retrieval.data.deepfurniture import DeepFurnitureError, build_manifest
 from product_retrieval.data.manifest import load_manifest
 from product_retrieval.data.store import ImageStore
 from product_retrieval.eval.retrieval import DEFAULT_KS
@@ -74,6 +75,33 @@ def data_check(
     typer.echo(report.model_dump_json(indent=2))
     if not report.ok:
         raise typer.Exit(code=1)
+
+
+@app.command("prepare-deepfurniture")
+def prepare_deepfurniture(
+    raw: Annotated[
+        Path,
+        typer.Option(
+            "--raw",
+            exists=True,
+            file_okay=False,
+            help="DeepFurniture data dir (metadata/, furnitures/, queries/)",
+        ),
+    ],
+    out: Annotated[Path, typer.Option("--out", help="manifest JSONL to write")],
+    data_root: Annotated[
+        Path,
+        typer.Option("--data-root", help="root receiving deepfurniture/images/<sha[:2]>/<sha>.img"),
+    ] = DEFAULT_DATA_ROOT,
+    seed: Annotated[int, typer.Option("--seed", help="identity split seed")] = 0,
+) -> None:
+    """Stream the raw archives into the image store and write the manifest and summary."""
+    try:
+        summary = build_manifest(raw, data_root, out, seed=seed)
+    except DeepFurnitureError as exc:
+        typer.echo(f"prepare-deepfurniture: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+    typer.echo(json.dumps({k: v for k, v in summary.items() if k != "archives"}, indent=2))
 
 
 @app.command("build-index")
