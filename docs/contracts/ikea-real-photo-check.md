@@ -10,6 +10,7 @@ All DeepFurniture queries are rendered. IKEA Interior gives real room photos wit
 - Gallery: every product image listed in `item_to_room.p` whose file exists (2,175). One image per product; product id = article number from the file name.
 - Queries: every room photo referenced by the mapping whose file exists (205). The correct answers for a room are all products the mapping lists for it whose image exists.
 - Rooms with no existing product are dropped and counted.
+- v1.1 (2026-10-06, before any IKEA number was computed): the clone files some products under two folders. When both files are byte-identical they are one image. Two basenames (`090.319.12.jpg`, `190.265.47.jpg`) have different bytes in two folders; there is no way to tell which is the product, so both are treated as missing (dropped from the gallery and from every room's answers) and listed in the report.
 - No split: the whole set is evaluation only. Nothing here is used for training or model choice.
 
 ## Query form
