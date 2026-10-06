@@ -15,7 +15,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
-Source = Literal["lrvs", "amazon", "own", "capture"]
+Source = Literal["lrvs", "amazon", "deepfurniture", "own", "capture"]
 Split = Literal["train", "val", "test"]
 CropKind = Literal["full", "box", "mask"]
 CropModel = Literal["sam21", "sam3"]
