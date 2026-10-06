@@ -186,16 +186,25 @@ def _stem(basename: str) -> str:
     return os.path.splitext(basename)[0]
 
 
-def run_ikea_check(
-    raw_root: Path,
-    embedder_name: IkeaEmbedderName = "siglip",
-    artifacts_root: Path = Path("artifacts"),
-    reports_root: Path = Path("reports"),
-) -> IkeaCheckResult:
-    """Run the check on the IKEA folder at ``raw_root`` and write ``reports/ikea/<model-slug>.json``."""
+@dataclass
+class IkeaPopulation:
+    """Gallery, rooms and answer sets of the IKEA check (contract v1.1), shared by later checks."""
+
+    mapping: dict[str, list[str]]
+    product_path: dict[str, Path]  # product id -> file
+    room_path: dict[str, Path]  # room id -> file
+    room_answers: dict[str, set[str]]  # room id -> existing products listed for it
+    room_listed: dict[str, set[str]]  # every room key in the mapping -> existing products listed
+    rooms_missing_file: int
+    rooms_dropped: int
+    identical_dups: list[str]
+    conflicts: list[str]
+    sha_of: dict[Path, str]
+
+
+def load_population(raw_root: Path) -> IkeaPopulation:
+    """Resolve the gallery, rooms and answers from the raw folder (contract v1.1)."""
     raw_root = Path(raw_root)
-    if not CONTRACT_PATH.is_file():
-        raise IkeaCheckError(f"contract file not found: {CONTRACT_PATH}")
     mapping = _load_mapping(raw_root)
     by_name = _index_files(raw_root)
     sha_of: dict[Path, str] = {}
@@ -249,6 +258,40 @@ def run_ikea_check(
         room_answers[rid] = room_listed[room_key]
     if not room_path:
         raise IkeaCheckError("no room with an existing photo and an existing product; nothing to evaluate")
+    return IkeaPopulation(
+        mapping=mapping,
+        product_path=product_path,
+        room_path=room_path,
+        room_answers=room_answers,
+        room_listed=room_listed,
+        rooms_missing_file=rooms_missing_file,
+        rooms_dropped=rooms_dropped,
+        identical_dups=identical_dups,
+        conflicts=conflicts,
+        sha_of=sha_of,
+    )
+
+
+def run_ikea_check(
+    raw_root: Path,
+    embedder_name: IkeaEmbedderName = "siglip",
+    artifacts_root: Path = Path("artifacts"),
+    reports_root: Path = Path("reports"),
+) -> IkeaCheckResult:
+    """Run the check on the IKEA folder at ``raw_root`` and write ``reports/ikea/<model-slug>.json``."""
+    raw_root = Path(raw_root)
+    if not CONTRACT_PATH.is_file():
+        raise IkeaCheckError(f"contract file not found: {CONTRACT_PATH}")
+    pop = load_population(raw_root)
+    mapping, product_path, room_path, room_answers = (
+        pop.mapping,
+        pop.product_path,
+        pop.room_path,
+        pop.room_answers,
+    )
+    room_listed, sha_of = pop.room_listed, pop.sha_of
+    rooms_missing_file, rooms_dropped = pop.rooms_missing_file, pop.rooms_dropped
+    identical_dups, conflicts = pop.identical_dups, pop.conflicts
 
     room_ids = sorted(room_path)
     product_ids = sorted(product_path)
