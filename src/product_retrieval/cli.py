@@ -36,6 +36,7 @@ from product_retrieval.pipelines.curve import (
     summarize,
 )
 from product_retrieval.pipelines.evaluate import IndexNotFoundError, format_report_table, run_eval
+from product_retrieval.pipelines.ikea_check import IkeaCheckError, format_ikea_table, run_ikea_check
 from product_retrieval.pipelines.selection import TestSplitAccessError
 from product_retrieval.rerank import v0 as rerank_v0
 from product_retrieval.rerank import v1 as rerank_v1
@@ -159,6 +160,43 @@ def build_index(
         raise typer.Exit(code=2) from exc
 
     typer.echo(json.dumps(result.summary, indent=2))
+
+
+@app.command("ikea-check")
+def ikea_check_cmd(
+    raw: Annotated[
+        Path,
+        typer.Option(
+            "--raw", exists=True, file_okay=False, help="IKEA Interior clone (has text_data/, images/)"
+        ),
+    ],
+    embedder: Annotated[
+        str, typer.Option("--embedder", help="embedder to use: siglip (default) or fake")
+    ] = "siglip",
+    artifacts_root: Annotated[
+        Path, typer.Option("--artifacts-root", help="root for the embedding cache")
+    ] = Path("artifacts"),
+    reports_root: Annotated[
+        Path, typer.Option("--reports-root", help="root for reports/ikea/<model-slug>.json")
+    ] = Path("reports"),
+) -> None:
+    """Real-room-photo check on IKEA Interior: room-level Hit@K / Recall@K (see docs/contracts)."""
+    if embedder not in ("siglip", "fake"):
+        typer.echo(f"ikea-check: unknown --embedder {embedder!r}; expected 'siglip' or 'fake'", err=True)
+        raise typer.Exit(code=2)
+    try:
+        result = run_ikea_check(
+            raw,
+            embedder_name=embedder,  # type: ignore[arg-type]
+            artifacts_root=artifacts_root,
+            reports_root=reports_root,
+        )
+    except IkeaCheckError as exc:
+        typer.echo(f"ikea-check: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+
+    typer.echo(format_ikea_table(result.report))
+    typer.echo(f"report: {result.report_path}")
 
 
 @app.command("eval")
