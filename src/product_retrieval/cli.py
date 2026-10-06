@@ -28,6 +28,7 @@ from product_retrieval.pipelines.cand_vectors import (
     cand_stats_index_id,
     load_candidate_vectors,
 )
+from product_retrieval.pipelines.crop_search import CropSearchError, format_crop_table, run_crop_search
 from product_retrieval.pipelines.curve import (
     EXPECTED_POPULATION,
     CurveError,
@@ -196,6 +197,50 @@ def ikea_check_cmd(
         raise typer.Exit(code=1) from exc
 
     typer.echo(format_ikea_table(result.report))
+    typer.echo(f"report: {result.report_path}")
+
+
+@app.command("crop-search")
+def crop_search_cmd(
+    raw: Annotated[
+        Path,
+        typer.Option(
+            "--raw", exists=True, file_okay=False, help="IKEA Interior clone (has text_data/, images/)"
+        ),
+    ],
+    embedder: Annotated[
+        str, typer.Option("--embedder", help="embedder to use: siglip (default) or fake")
+    ] = "siglip",
+    detector: Annotated[
+        str, typer.Option("--detector", help="detector to use: owl (default) or fake")
+    ] = "owl",
+    artifacts_root: Annotated[
+        Path, typer.Option("--artifacts-root", help="root for the embedding cache")
+    ] = Path("artifacts"),
+    reports_root: Annotated[
+        Path, typer.Option("--reports-root", help="root for reports/crop/<run-id>.json")
+    ] = Path("reports"),
+) -> None:
+    """Whole room photo vs detector -> crop -> merge on IKEA rooms (see docs/contracts)."""
+    if embedder not in ("siglip", "fake"):
+        typer.echo(f"crop-search: unknown --embedder {embedder!r}; expected 'siglip' or 'fake'", err=True)
+        raise typer.Exit(code=2)
+    if detector not in ("owl", "fake"):
+        typer.echo(f"crop-search: unknown --detector {detector!r}; expected 'owl' or 'fake'", err=True)
+        raise typer.Exit(code=2)
+    try:
+        result = run_crop_search(
+            raw,
+            embedder_name=embedder,
+            detector=detector,  # type: ignore[arg-type]
+            artifacts_root=artifacts_root,
+            reports_root=reports_root,
+        )
+    except (IkeaCheckError, CropSearchError) as exc:
+        typer.echo(f"crop-search: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+
+    typer.echo(format_crop_table(result.report))
     typer.echo(f"report: {result.report_path}")
 
 
