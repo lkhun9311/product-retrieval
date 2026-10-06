@@ -70,11 +70,15 @@ def load_candidate_vectors(
     artifacts_root: Path = Path("artifacts"),
     limit_products: int | None = None,
     reports_root: Path = Path("reports"),
+    final: bool = False,
 ) -> CandidateVectors:
-    """Vectors for ``query_ids`` of ``split``; fails if the located index is not ``expected_index_id``."""
+    """Vectors for ``query_ids`` of ``split``; fails if the located index is not ``expected_index_id``.
+
+    ``split="test"`` needs ``final=True``; the access is then logged by ``select_split``.
+    """
     if config.crop_kind != "full":
         raise NotImplementedError(f"crop kind {config.crop_kind!r} is not implemented; only 'full' is")
-    selection = select_split(config, split, limit_products, False, reports_root, command="rerank-v2")
+    selection = select_split(config, split, limit_products, final, reports_root, command="rerank-v2")
     queries_by_id = {q.query_id: q for q in selection.queries}
     unknown = [qid for qid in query_ids if qid not in queries_by_id]
     if unknown:
