@@ -64,6 +64,13 @@ CONTRACT_FILES = (
 )
 MAX_ATTEMPTS = 2  # first try plus one retry, retry only for non-deterministic (OS) errors
 NOT_REACHED_TEXT = "지정 지점 3,000까지 도달 관측 없음"
+
+
+def not_reached_text(max_budget: int) -> str:
+    """The non-reach label for a seed whose largest planned point is ``max_budget``."""
+    return f"지정 지점 {max_budget:,}까지 도달 관측 없음"
+
+
 UNDETERMINED_TEXT = "판정 불가"
 NO_RUN_TEXT = "미실행"
 FAILED_TEXT = "실패"
@@ -113,6 +120,23 @@ def grid_keys(
         for seed in seeds
         for budget in budgets
     ]
+
+
+def _check_rectangular(keys: Sequence[Key]) -> list[Key]:
+    """A custom plan must be a full grid (every condition x seed x budget once), so the summary's
+    per-condition and per-budget denominators are the planned ones."""
+    keys = list(keys)
+    conditions = {(k.policy, k.noise) for k in keys}
+    seeds = {k.seed for k in keys}
+    budgets = {k.budget for k in keys}
+    full = {(c[0], c[1], s, b) for c in conditions for s in seeds for b in budgets}
+    got = [(k.policy, k.noise, k.seed, k.budget) for k in keys]
+    if len(got) != len(set(got)) or set(got) != full:
+        raise CurveError(
+            "a custom plan must contain every condition x seed x budget exactly once "
+            f"({len(conditions)} x {len(seeds)} x {len(budgets)} = {len(full)} keys, got {len(got)})"
+        )
+    return keys
 
 
 def plan_keys() -> list[Key]:
@@ -521,7 +545,7 @@ def run_curve(
     if not isinstance(hypothesis_id, str) or not hypothesis_id.strip():
         raise CurveError("hypothesis_id must be a non-empty string")
     # the contract plan is fixed; only a custom plan is validated (its budgets must fit the reference budget)
-    plan_list = plan_keys() if plan is None else _check_keys(plan, reference_budget)
+    plan_list = plan_keys() if plan is None else _check_rectangular(_check_keys(plan, reference_budget))
     if hypothesis_id == HYPOTHESIS_ID and [k.id for k in plan_list] != [k.id for k in plan_keys()]:
         raise CurveError(f"hypothesis id {HYPOTHESIS_ID!r} is reserved for the 108-key contract plan")
     requested = _check_keys(plan_list if keys is None else keys, reference_budget)
@@ -714,7 +738,7 @@ def first_observed_point(points: Sequence[dict]) -> dict:
     return {
         "verdict": "not_reached",
         "budget": None,
-        "label": NOT_REACHED_TEXT,
+        "label": not_reached_text(max(p["budget"] for p in ordered)) if ordered else NOT_REACHED_TEXT,
         "unconfirmed_reach_budget": None,
         "reason": None,
         "persistence": None,
