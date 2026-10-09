@@ -14,11 +14,15 @@ import typer
 
 from product_retrieval import __version__
 from product_retrieval.core.config import DEFAULT_DATA_ROOT, load_config
+from product_retrieval.core.ids import sha256_file
 from product_retrieval.data.checks import check_manifest
 from product_retrieval.data.deepfurniture import DeepFurnitureError, build_manifest
 from product_retrieval.data.manifest import load_manifest
 from product_retrieval.data.store import ImageStore
 from product_retrieval.eval.bootstrap import paired_bootstrap
+from product_retrieval.eval.gate import CONTRACT_ID as GATE_CONTRACT_ID
+from product_retrieval.eval.gate import PASS as GATE_PASS
+from product_retrieval.eval.gate import GateError, evaluate_gate
 from product_retrieval.eval.retrieval import DEFAULT_KS, QueryResult, recall_at_k
 from product_retrieval.feedback.labels import LabelBuildError, run_labels
 from product_retrieval.feedback.simulate import SimulationError, run_simulate
@@ -32,8 +36,10 @@ from product_retrieval.pipelines.cand_vectors import (
 from product_retrieval.pipelines.crop_search import CropSearchError, format_crop_table, run_crop_search
 from product_retrieval.pipelines.curve import (
     EXPECTED_POPULATION,
+    HYPOTHESIS_ID,
     CurveError,
     plan_keys,
+    read_plan_file,
     run_curve,
     summarize,
 )
@@ -745,10 +751,26 @@ def curve(
             help="smoke test: run only the first N of the 108 keys (skips the population count check)",
         ),
     ] = None,
+    plan: Annotated[
+        Path | None,
+        typer.Option(
+            "--plan",
+            exists=True,
+            dir_okay=False,
+            help="JSON list of {policy, noise, seed, budget} keys to run instead of the 108 contract keys; "
+            "needs --hypothesis-id",
+        ),
+    ] = None,
+    hypothesis_id: Annotated[
+        str,
+        typer.Option("--hypothesis-id", help="hypothesis id written to plan.json and every run record"),
+    ] = HYPOTHESIS_ID,
 ) -> None:
     """Run the learning-curve grid on train/val (C4, contract c4-learning-curve); never opens test."""
     try:
-        keys = None if only_keys is None else plan_keys()[: max(only_keys, 0)]
+        plan_list = None if plan is None else read_plan_file(plan)
+        base = plan_keys() if plan_list is None else plan_list
+        keys = None if only_keys is None else base[: max(only_keys, 0)]
         if keys is not None and not keys:
             raise CurveError("--only-keys must be at least 1")
         result = run_curve(
@@ -763,6 +785,8 @@ def curve(
             run_id=run_id,
             keys=keys,
             expected_population=None if only_keys is not None else EXPECTED_POPULATION,
+            plan=plan_list,
+            hypothesis_id=hypothesis_id,
         )
     except (CurveError, SimulationError, LabelBuildError, *V2_ERRORS) as exc:
         typer.echo(f"curve: {exc}", err=True)
@@ -793,10 +817,68 @@ def curve_summary(
     )
 
 
+def _gate_error_output(kind: str, message: str) -> dict:
+    return {"contract": GATE_CONTRACT_ID, "decision": "error", "error": {"kind": kind, "message": message}}
+
+
+def _gate_emit(result: dict, out: Path | None) -> None:
+    text = json.dumps(result, indent=2, allow_nan=False) + "\n"
+    typer.echo(text, nl=False)
+    if out is not None:
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(text, encoding="utf-8")
+
+
 @app.command("gate")
-def gate() -> None:
-    """Gate a candidate bundle against the current one (C5)."""
-    _not_implemented("gate")
+def gate(
+    current: Annotated[
+        Path | None, typer.Option("--current", help="rankings JSONL of the deployed bundle")
+    ] = None,
+    candidate: Annotated[
+        Path | None, typer.Option("--candidate", help="rankings JSONL of the candidate")
+    ] = None,
+    candidate_model: Annotated[
+        Path | None, typer.Option("--candidate-model", help="model.json of the candidate")
+    ] = None,
+    out: Annotated[Path | None, typer.Option("--out", help="also write the result as JSON")] = None,
+) -> None:
+    """Deployment gate (contract c6-deploy-gate-v1). Exit code 0 pass, 2 block, 1 error.
+
+    The input files are checked here, not by the option parser, because the parser's own usage errors
+    exit with code 2, which this command reserves for block. An error is written to --out as well, so
+    that a stale earlier result is never left next to a failed run.
+    """
+    try:
+        given = {"--current": current, "--candidate": candidate, "--candidate-model": candidate_model}
+        for name, path in given.items():
+            if path is None:
+                raise GateError("missing_option", f"{name} is required")
+            if not path.is_file():
+                raise GateError("input_not_found", f"{name} {path} is not a file")
+        assert current is not None and candidate is not None and candidate_model is not None
+        try:
+            res_current = _load_query_results(current)
+            res_candidate = _load_query_results(candidate)
+        except (ValueError, TypeError, OSError) as exc:
+            raise GateError("input_error", str(exc)) from exc
+        try:
+            model = json.loads(candidate_model.read_text(encoding="utf-8"))
+        except (ValueError, OSError) as exc:
+            raise GateError("invalid_model", f"{candidate_model}: {exc}") from exc
+        result = evaluate_gate(res_current, res_candidate, model)
+        result["inputs"] = {
+            "current": {"path": str(current), "sha256": sha256_file(current)},
+            "candidate": {"path": str(candidate), "sha256": sha256_file(candidate)},
+            "candidate_model": {"path": str(candidate_model), "sha256": sha256_file(candidate_model)},
+            **result["inputs"],
+        }
+    except (GateError, ValueError) as exc:
+        kind = exc.kind if isinstance(exc, GateError) else "input_error"
+        typer.echo(f"gate: {exc}", err=True)
+        _gate_emit(_gate_error_output(kind, str(exc)), out)
+        raise typer.Exit(code=1) from exc
+    _gate_emit(result, out)
+    raise typer.Exit(code=0 if result["decision"] == GATE_PASS else 2)
 
 
 @app.command("serve")

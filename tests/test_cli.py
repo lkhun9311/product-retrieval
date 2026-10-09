@@ -328,11 +328,6 @@ def test_train_rerank_stub_exits_2():
     assert result.exit_code == 2
 
 
-def test_gate_stub_exits_2():
-    result = runner.invoke(app, ["gate"])
-    assert result.exit_code == 2
-
-
 def test_serve_stub_exits_2():
     result = runner.invoke(app, ["serve"])
     assert result.exit_code == 2

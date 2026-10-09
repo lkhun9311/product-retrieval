@@ -976,3 +976,207 @@ def test_cli_curve_and_summary(env):
     assert "--split" not in runner.invoke(app, ["curve", "--help"]).output  # no way to name the test split
     bad = runner.invoke(app, ["curve-summary", "--run-dir", str(env.tmp)])
     assert bad.exit_code == 1 and "plan.json" in bad.output
+
+
+# ---- plan and hypothesis override (c6-deploy-gate-v1 section 6b) ----------------------------------
+
+C6_ID = "C6-gate-check"
+
+
+def c6_plan(seeds=(3, 4), noises=(0.0, 0.1), budgets=(100, 200)):
+    return curve.grid_keys([("stratified", n) for n in noises], seeds, budgets)
+
+
+def test_default_plan_is_unchanged_by_the_plan_override():
+    keys = curve.plan_keys()
+    # sha256 of the key ids joined by "|", computed from the code before the override existed
+    assert (
+        hashlib.sha256("|".join(k.id for k in keys).encode()).hexdigest()
+        == "79f59558ec14875c568122ff1bbb1040bed2a7fdbc06960bb5bf6a9ba6095187"
+    )
+    assert curve.HYPOTHESIS_ID == "H1-rerank-r5" and len(keys) == 108
+    assert keys == curve.grid_keys(curve.CONDITIONS, curve.SEEDS, curve.BUDGETS)
+
+
+def test_default_summary_bytes_are_unchanged(tmp_path):
+    # sha256 of summary.json and table.md produced by the code before the override existed, same input
+    records = primary_records({0: S0, 1: S1, 2: S2}, failed={(1, 300)})
+    run_dir = make_run_dir(tmp_path, records)
+    curve.summarize(run_dir)
+    assert (
+        hashlib.sha256((run_dir / "summary.json").read_bytes()).hexdigest()
+        == "13df2eecb3aba33a27f83946c2ae6ee76c36daaab08885909904a828f255b37a"
+    )
+    assert (
+        hashlib.sha256((run_dir / "table.md").read_bytes()).hexdigest()
+        == "a874b7ac8aa0733a431ba45c1e0974310dfcbd3fb131595c96265b9f4799a965"
+    )
+
+
+def test_grid_keys_order_and_the_c6_gate_check_plan():
+    keys = curve.grid_keys([("stratified", n) for n in (0.0, 0.1, 0.2)], (3, 4, 5), (100, 3000))
+    assert len(keys) == 18 == len({k.id for k in keys})
+    assert keys[0] == ("stratified", 0.0, 3, 100) and keys[1] == ("stratified", 0.0, 3, 3000)
+    assert keys[2] == ("stratified", 0.0, 4, 100) and keys[6] == ("stratified", 0.1, 3, 100)
+    assert keys[17] == ("stratified", 0.2, 5, 3000)
+
+
+def test_custom_plan_and_hypothesis_are_used_by_execution_and_summary(grid):
+    plan = c6_plan()
+    res = run(grid, None, run_id="c6", plan=plan, hypothesis_id=C6_ID)
+    assert (res["attempted"], res["completed"], res["failed"]) == (8, 8, 0)
+    recs = lines(grid, "c6")
+    assert [r["key_id"] for r in recs] == [k.id for k in plan]  # exactly the plan, in plan order
+    assert {r["hypothesis_id"] for r in recs} == {C6_ID}
+    plan_json = json.loads((grid.out_root / "c6" / "plan.json").read_text(encoding="utf-8"))
+    assert plan_json["hypothesis_id"] == C6_ID
+    assert [k["key_id"] for k in plan_json["keys"]] == [k.id for k in plan]
+    assert plan_json["requested_key_ids"] == [k.id for k in plan]
+
+    summary = curve.summarize(grid.out_root / "c6")
+    assert summary["hypothesis_id"] == C6_ID and summary["run_id"] == "c6"
+    assert summary["counts"] == {"planned": 8, "completed": 8, "failed": 0, "not_run": 0}
+    primary = summary["primary"]
+    assert list(primary["seeds"]) == ["3", "4"] and "seed3" in primary["result"]["seed_points"]
+    assert [p["budget"] for p in primary["points"]] == [100, 200]
+    assert {p["n_seeds_planned"] for p in primary["points"]} == {2}
+    assert all(p["mean_label"] == "2-seed 평균" for p in primary["points"])
+    assert [pt["budget"] for pt in primary["seeds"]["4"]["points"]] == [100, 200]
+    assert list(summary["secondary"]) == ["stratified, p=0.1"]
+    assert list(summary["secondary"]["stratified, p=0.1"]["seeds"]) == ["3", "4"]
+    table = (grid.out_root / "c6" / "table.md").read_text(encoding="utf-8")
+    assert C6_ID in table and "H1-rerank-r5" not in table
+    assert (grid.out_root / "c6" / "curve.png").is_file()
+
+
+def test_custom_plan_run_leaves_the_default_run_untouched(grid):
+    run(grid, [K_A], run_id="h1")
+    before = (grid.out_root / "h1" / "runs.jsonl").read_text(encoding="utf-8")
+    run(grid, None, run_id="c6", plan=c6_plan(seeds=(3,), noises=(0.0,)), hypothesis_id=C6_ID)
+    assert (grid.out_root / "h1" / "runs.jsonl").read_text(encoding="utf-8") == before
+    assert lines(grid, "h1")[0]["hypothesis_id"] == curve.HYPOTHESIS_ID
+
+
+def test_model_json_records_the_label_policy(grid):
+    run(grid, [K_A, K_R], run_id="pol")
+    policies = {}
+    for rec_ in lines(grid, "pol"):
+        model = json.loads(
+            (grid.out_root / "pol" / "models" / rec_["reranker_version"] / "model.json").read_text()
+        )
+        policies[rec_["policy"]] = model["label_policy"]
+    assert policies == {"stratified": "stratified", "random": "random"}
+
+
+def test_h1_id_is_reserved_for_the_contract_plan(grid):
+    with pytest.raises(CurveError, match="reserved"):
+        run(grid, None, run_id="x", plan=c6_plan())  # custom plan, default (H1) hypothesis id
+    with pytest.raises(CurveError, match="reserved"):
+        run(grid, None, run_id="x", plan=[K_A])
+    with pytest.raises(CurveError, match="hypothesis_id"):
+        run(grid, None, run_id="x", plan=c6_plan(), hypothesis_id="  ")
+    assert not (grid.out_root / "x").exists()
+
+
+def test_requested_keys_must_belong_to_a_custom_plan(grid):
+    with pytest.raises(CurveError, match="not all in the plan"):
+        run(grid, [K_A], run_id="x", plan=c6_plan(), hypothesis_id=C6_ID)
+    with pytest.raises(CurveError, match="duplicate"):
+        run(grid, None, run_id="x", plan=[*c6_plan(), c6_plan()[0]], hypothesis_id=C6_ID)
+    with pytest.raises(CurveError, match="exceeds"):
+        run(grid, None, run_id="x", plan=c6_plan(budgets=(100, 300)), hypothesis_id=C6_ID)
+
+
+def test_resume_with_another_hypothesis_or_plan_is_refused(grid):
+    run(grid, [K_A], run_id="r1")
+    with pytest.raises(CurveError, match="hypothesis_id"):
+        run(grid, [K_A], run_id="r1", hypothesis_id="other")
+    plan = c6_plan(seeds=(3,), noises=(0.0,))
+    run(grid, None, run_id="c6", plan=plan, hypothesis_id=C6_ID)
+    with pytest.raises(CurveError, match="keys"):
+        run(grid, None, run_id="c6", plan=c6_plan(seeds=(4,), noises=(0.0,)), hypothesis_id=C6_ID)
+    with pytest.raises(CurveError, match="hypothesis_id"):
+        run(grid, None, run_id="c6", plan=plan, hypothesis_id="C6-other")
+
+
+def test_summary_refuses_records_of_another_hypothesis(grid):
+    run(grid, None, run_id="c6", plan=c6_plan(seeds=(3,), noises=(0.0,)), hypothesis_id=C6_ID)
+    path = grid.out_root / "c6" / "runs.jsonl"
+    rows = [json.loads(x) for x in path.read_text(encoding="utf-8").splitlines()]
+    rows[0]["hypothesis_id"] = curve.HYPOTHESIS_ID
+    path.write_text("".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
+    with pytest.raises(CurveError, match="hypothesis"):
+        curve.summarize(grid.out_root / "c6")
+
+
+def test_summary_of_a_custom_plan_without_the_primary_condition_is_refused(grid):
+    plan = curve.grid_keys([("stratified", 0.1)], (3,), (100,))
+    run(grid, None, run_id="np", plan=plan, hypothesis_id=C6_ID)
+    with pytest.raises(CurveError, match="condition"):
+        curve.summarize(grid.out_root / "np")
+
+
+def test_read_plan_file(tmp_path):
+    good = tmp_path / "plan.json"
+    good.write_text(
+        json.dumps([{"policy": "stratified", "noise": 0, "seed": 3, "budget": 100}]), encoding="utf-8"
+    )
+    assert curve.read_plan_file(good) == [Key("stratified", 0.0, 3, 100)]
+    item = {"policy": "stratified", "noise": 0.1, "seed": 3, "budget": 100}
+    bad = {
+        "empty": [],
+        "not_a_list": {"keys": []},
+        "missing_field": [{k: v for k, v in item.items() if k != "seed"}],
+        "bool_seed": [{**item, "seed": True}],
+        "str_budget": [{**item, "budget": "100"}],
+        "float_seed": [{**item, "seed": 3.0}],
+        "not_an_object": [5],
+    }
+    for name, body in bad.items():
+        path = tmp_path / f"{name}.json"
+        path.write_text(json.dumps(body), encoding="utf-8")
+        with pytest.raises(CurveError):
+            curve.read_plan_file(path)
+    with pytest.raises(CurveError):
+        curve.read_plan_file(tmp_path / "missing.json")
+    broken = tmp_path / "broken.json"
+    broken.write_text("{", encoding="utf-8")
+    with pytest.raises(CurveError):
+        curve.read_plan_file(broken)
+
+
+def test_cli_curve_plan_and_hypothesis(env):
+    runner = CliRunner()
+    plan = env.tmp / "plan.json"
+    plan.write_text(
+        json.dumps(
+            [
+                {"policy": "stratified", "noise": 0.0, "seed": 3, "budget": 100},
+                {"policy": "stratified", "noise": 0.1, "seed": 3, "budget": 100},
+            ]
+        ),
+        encoding="utf-8",
+    )
+    args = ["curve", "--config", str(env.cfg), "--train-rankings", str(env.train[0])]
+    args += ["--val-rankings", str(env.val[0]), "--train-cand-stats", str(env.train[1])]
+    args += ["--val-cand-stats", str(env.val[1]), "--embedder", "fake", "--artifacts-root", str(env.art)]
+    args += ["--out-root", str(env.tmp / "c"), "--plan", str(plan)]
+    # the H1 id is reserved for the 108-key plan
+    res = runner.invoke(app, [*args, "--run-id", "h", "--only-keys", "1"])
+    assert res.exit_code == 1 and "reserved" in res.output
+    # the 3,000-label reference exceeds the tiny train split: the key is recorded as failed (exit code 3)
+    res = runner.invoke(app, [*args, "--run-id", "g", "--hypothesis-id", C6_ID, "--only-keys", "1"])
+    assert res.exit_code == 3, res.output
+    (rec_,) = [json.loads(x) for x in (env.tmp / "c" / "g" / "runs.jsonl").read_text().splitlines()]
+    assert rec_["hypothesis_id"] == C6_ID and rec_["key_id"] == "stratified|p0|s3|B100"
+    plan_json = json.loads((env.tmp / "c" / "g" / "plan.json").read_text())
+    assert plan_json["hypothesis_id"] == C6_ID and len(plan_json["keys"]) == 2
+    assert plan_json["requested_key_ids"] == ["stratified|p0|s3|B100"]
+    res = runner.invoke(app, ["curve-summary", "--run-dir", str(env.tmp / "c" / "g")])
+    assert res.exit_code == 0, res.output
+    summary = json.loads((env.tmp / "c" / "g" / "summary.json").read_text())
+    assert summary["hypothesis_id"] == C6_ID and summary["counts"]["planned"] == 2
+    assert summary["counts"]["not_run"] == 1 and summary["counts"]["failed"] == 1
+    # no --plan: the options keep their H1 defaults
+    help_out = runner.invoke(app, ["curve", "--help"]).output
+    assert "--plan" in help_out and "H1-rerank-r5" in help_out
