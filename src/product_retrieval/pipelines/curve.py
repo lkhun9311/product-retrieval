@@ -103,14 +103,50 @@ class Key(NamedTuple):
         }
 
 
-def plan_keys() -> list[Key]:
-    """The 108 contract keys: condition (primary, 0.1, 0.2, random) > seed > budget ascending."""
+def grid_keys(
+    conditions: Sequence[tuple[str, float]], seeds: Sequence[int], budgets: Sequence[int]
+) -> list[Key]:
+    """Keys in the contract order: condition > seed > budget, each in the order given."""
     return [
         Key(policy, float(noise), seed, budget)
-        for policy, noise in CONDITIONS
-        for seed in SEEDS
-        for budget in BUDGETS
+        for policy, noise in conditions
+        for seed in seeds
+        for budget in budgets
     ]
+
+
+def plan_keys() -> list[Key]:
+    """The 108 contract keys: condition (primary, 0.1, 0.2, random) > seed > budget ascending."""
+    return grid_keys(CONDITIONS, SEEDS, BUDGETS)
+
+
+def read_plan_file(path: Path) -> list[Key]:
+    """Keys of a plan file: a JSON list of ``{"policy", "noise", "seed", "budget"}`` objects, in run order."""
+    try:
+        raw = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise CurveError(f"{path}: cannot read the plan: {exc}") from exc
+    if not isinstance(raw, list) or not raw:
+        raise CurveError(f"{path}: a plan is a non-empty JSON list of key objects")
+    keys = []
+    for i, item in enumerate(raw):
+        try:
+            noise, seed, budget = item["noise"], item["seed"], item["budget"]
+            policy = item["policy"]
+        except (KeyError, TypeError) as exc:
+            raise CurveError(f"{path}[{i}]: needs policy, noise, seed and budget") from exc
+        if (
+            not isinstance(policy, str)
+            or isinstance(noise, bool)
+            or not isinstance(noise, int | float)
+            or isinstance(seed, bool)
+            or not isinstance(seed, int)
+            or isinstance(budget, bool)
+            or not isinstance(budget, int)
+        ):
+            raise CurveError(f"{path}[{i}]: wrong types in {item!r}")
+        keys.append(Key(policy, float(noise), seed, budget))
+    return keys
 
 
 # ---- small helpers -----------------------------------------------------------------------------
@@ -264,7 +300,9 @@ class _Context:
         train_index_id: str,
         bootstrap_b: int,
         reference_budget: int,
+        hypothesis_id: str = HYPOTHESIS_ID,
     ):
+        self.hypothesis_id = hypothesis_id
         self.train_rows, self.train_sha = train_rows, train_sha
         self.train_cs, self.train_cs_sha = train_cs, train_cs_sha
         self.train_vectors = train_vectors
@@ -321,7 +359,7 @@ def _run_one(ctx: _Context, key: Key, attempt: int, out_dir: Path, code_commit: 
         "status": "failed",
         "started_at": _now(),
         "code_commit": code_commit,
-        "hypothesis_id": HYPOTHESIS_ID,
+        "hypothesis_id": ctx.hypothesis_id,
         "preregistration": PREREGISTRATION,
         "error": None,
         "error_type": None,
@@ -362,6 +400,7 @@ def _run_one(ctx: _Context, key: Key, attempt: int, out_dir: Path, code_commit: 
             if k in t
         }
         rec["training"]["n_holdout"] = t["n_holdout"]
+        model["label_policy"] = key.policy  # read by the deployment gate (c6-deploy-gate-v1)
         rerank_v2.save_model(model, out_dir / "models")
 
         reranked = rerank_v2.rerank_rows(
@@ -467,15 +506,27 @@ def run_curve(
     reference_budget: int = REFERENCE_BUDGET,
     expected_population: tuple[int, int] | None = EXPECTED_POPULATION,
     bootstrap_b: int = BOOTSTRAP_B,
+    plan: Sequence[Key | tuple] | None = None,
+    hypothesis_id: str = HYPOTHESIS_ID,
 ) -> dict:
-    """Run (or resume) the grid. ``keys=None`` runs all 108; a subset is for smoke tests and resumes.
+    """Run (or resume) the grid. ``keys=None`` runs the whole plan; a subset is for smoke tests and resumes.
 
-    ``plan.json`` always lists the 108 contract keys and, when a subset is run, the requested ones.
-    Returns ``{"run_dir", "run_id", "attempted", "completed", "failed", "skipped"}`` for this call.
+    ``plan.json`` lists the plan keys (default: the 108 contract keys) and, when a subset is run, the
+    requested ones. A custom ``plan`` needs its own ``hypothesis_id``: the H1 id is reserved for the 108-key
+    plan, so H1's plan and records cannot be written by another plan. With a custom plan, ``keys`` must be a
+    subset of it. Returns ``{"run_dir", "run_id", "attempted", "completed", "failed", "skipped"}``.
     """
     if embedder not in ("siglip", "fake"):
         raise CurveError(f"unknown embedder {embedder!r}; expected 'siglip' or 'fake'")
-    requested = _check_keys(plan_keys() if keys is None else keys, reference_budget)
+    if not isinstance(hypothesis_id, str) or not hypothesis_id.strip():
+        raise CurveError("hypothesis_id must be a non-empty string")
+    # the contract plan is fixed; only a custom plan is validated (its budgets must fit the reference budget)
+    plan_list = plan_keys() if plan is None else _check_keys(plan, reference_budget)
+    if hypothesis_id == HYPOTHESIS_ID and [k.id for k in plan_list] != [k.id for k in plan_keys()]:
+        raise CurveError(f"hypothesis id {HYPOTHESIS_ID!r} is reserved for the 108-key contract plan")
+    requested = _check_keys(plan_list if keys is None else keys, reference_budget)
+    if plan is not None and not {k.id for k in requested} <= {k.id for k in plan_list}:
+        raise CurveError("requested keys are not all in the plan")
     train_rankings, val_rankings = Path(train_rankings), Path(val_rankings)
     train_cand_stats, val_cand_stats = Path(train_cand_stats), Path(val_cand_stats)
 
@@ -506,11 +557,11 @@ def run_curve(
 
     plan = {
         "run_id": run_id,
-        "hypothesis_id": HYPOTHESIS_ID,
+        "hypothesis_id": hypothesis_id,
         "preregistration": PREREGISTRATION,
         "contract": CONTRACT_NAME,
         "started_at": _now(),
-        "keys": [k.as_dict() for k in plan_keys()],
+        "keys": [k.as_dict() for k in plan_list],
         "requested_key_ids": [k.id for k in requested],
         "contract_sha256": _contract_hashes(),
         "git": _git_state(),
@@ -539,7 +590,15 @@ def run_curve(
     current_commit = plan["git"]["commit"]
     if plan_path.exists():
         old = json.loads(plan_path.read_text(encoding="utf-8"))
-        for field in ("keys", "contract_sha256", "inputs", "val_query_list_sha256", "baseline", "bootstrap"):
+        for field in (
+            "keys",
+            "hypothesis_id",
+            "contract_sha256",
+            "inputs",
+            "val_query_list_sha256",
+            "baseline",
+            "bootstrap",
+        ):
             if old.get(field) != plan[field]:
                 raise CurveError(f"{plan_path} exists with a different {field!r}; use a new --run-id")
         plan = old  # keep the original start time and commit
@@ -583,6 +642,7 @@ def run_curve(
         train_index_id,
         bootstrap_b,
         reference_budget,
+        hypothesis_id,
     )
     for key, attempt in todo:
         rec = _run_one(ctx, key, attempt, out_dir, current_commit)
@@ -662,11 +722,15 @@ def first_observed_point(points: Sequence[dict]) -> dict:
     }
 
 
-def result_sentence(per_seed: Sequence[dict]) -> dict:
-    """Contract section 5 result sentence from the per-seed ``first_observed_point`` results."""
+def result_sentence(per_seed: Sequence[dict], seeds: Sequence[int] | None = None) -> dict:
+    """Contract section 5 result sentence from the per-seed ``first_observed_point`` results.
+
+    ``seeds`` names the seeds in the sentence (default: their positions 0, 1, ...).
+    """
     reached = [s["budget"] for s in per_seed if s["verdict"] == "reached"]
     n = len(per_seed)
-    seed_text = ", ".join(f"seed{i}: {s['label']}" for i, s in enumerate(per_seed))
+    names = list(range(n)) if seeds is None else list(seeds)
+    seed_text = ", ".join(f"seed{names[i]}: {s['label']}" for i, s in enumerate(per_seed))
     if len(reached) == n:
         med = statistics.median(reached)
         med_text = budget_label(int(med)) if med == int(med) else str(med)
@@ -721,6 +785,12 @@ def summarize(run_dir: Path) -> dict:
         raise CurveError(f"{plan_path} is missing; not a curve run directory")
     plan = json.loads(plan_path.read_text(encoding="utf-8"))
     runs = read_runs(run_dir / "runs.jsonl")
+    for r in runs:
+        if r.get("hypothesis_id", plan["hypothesis_id"]) != plan["hypothesis_id"]:
+            raise CurveError(
+                f"record {r['key_id']!r} belongs to hypothesis {r['hypothesis_id']!r}, "
+                f"the plan to {plan['hypothesis_id']!r}"
+            )
     final = _final_records(runs, plan["keys"])
     for rec in final.values():
         if rec["status"] == "completed":
@@ -736,6 +806,13 @@ def summarize(run_dir: Path) -> dict:
     counts = {"planned": len(plan["keys"]), "completed": 0, "failed": 0, "not_run": 0}
     for k in plan["keys"]:
         counts[status_of(k)] += 1
+
+    # the axes come from the plan: conditions in plan order, seeds and budgets ascending
+    conditions = list(dict.fromkeys((k["policy"], float(k["noise"])) for k in plan["keys"]))
+    seeds = sorted({k["seed"] for k in plan["keys"]})
+    budgets = sorted({k["budget"] for k in plan["keys"]})
+    if PRIMARY not in conditions:
+        raise CurveError(f"the plan has no {condition_name(*PRIMARY)} condition; the summary needs it")
 
     # condition -> seed -> budget -> point
     grid: dict[tuple[str, float], dict[int, list[dict]]] = {}
@@ -757,7 +834,7 @@ def summarize(run_dir: Path) -> dict:
 
     def mean_points(cond: tuple[str, float]) -> list[dict]:
         out = []
-        for b in BUDGETS:
+        for b in budgets:
             done = [
                 p
                 for s in sorted(grid[cond])
@@ -765,12 +842,14 @@ def summarize(run_dir: Path) -> dict:
                 if p["budget"] == b and p["status"] == "completed"
             ]
             n = len(done)
-            entry: dict[str, Any] = {"budget": b, "n_seeds_completed": n, "n_seeds_planned": len(SEEDS)}
+            entry: dict[str, Any] = {"budget": b, "n_seeds_completed": n, "n_seeds_planned": len(seeds)}
             if n:
                 entry["mean_r5"] = seed_mean([p["r5"] for p in done])
                 entry["mean_delta_r5"] = seed_mean([p["delta_r5"] for p in done])
-                entry["mean_label"] = "3-seed 평균" if n == len(SEEDS) else f"성공 {n}/{len(SEEDS)} seed 평균"
-                entry["is_full_seed_mean"] = n == len(SEEDS)
+                entry["mean_label"] = (
+                    f"{len(seeds)}-seed 평균" if n == len(seeds) else f"성공 {n}/{len(seeds)} seed 평균"
+                )
+                entry["is_full_seed_mean"] = n == len(seeds)
             else:
                 entry["mean_r5"] = entry["mean_delta_r5"] = None
                 entry["mean_label"] = "없음(성공 seed 0)"
@@ -780,7 +859,7 @@ def summarize(run_dir: Path) -> dict:
 
     per_seed = []
     seeds_out = {}
-    for s in SEEDS:
+    for s in seeds:
         pts = sorted(grid[PRIMARY].get(s, []), key=lambda p: p["budget"])
         first = first_observed_point(pts)
         if first["verdict"] == "reached":
@@ -793,7 +872,7 @@ def summarize(run_dir: Path) -> dict:
         per_seed.append(first)
         seeds_out[str(s)] = {"first_observed": first, "points": pts}
 
-    sentence = result_sentence(per_seed)
+    sentence = result_sentence(per_seed, seeds)
     summary = {
         "hypothesis_id": plan["hypothesis_id"],
         "preregistration": plan["preregistration"],
@@ -823,9 +902,9 @@ def summarize(run_dir: Path) -> dict:
         "secondary": {
             condition_name(*c): {
                 "points": mean_points(c),
-                "seeds": {str(s): grid[c].get(s, []) for s in SEEDS},
+                "seeds": {str(s): grid[c].get(s, []) for s in seeds},
             }
-            for c in CONDITIONS
+            for c in conditions
             if c != PRIMARY
         },
         "failures": [
@@ -924,8 +1003,9 @@ def _plot(summary: dict, path: Path) -> None:
                 label=f"{name} (mean)",
             )
     colors = ["tab:blue", "tab:orange", "tab:green"]
-    for s, color in zip(SEEDS, colors, strict=True):
-        pts = [p for p in summary["primary"]["seeds"][str(s)]["points"] if p["status"] == "completed"]
+    for i, s in enumerate(summary["primary"]["seeds"]):
+        color = colors[i % len(colors)]
+        pts = [p for p in summary["primary"]["seeds"][s]["points"] if p["status"] == "completed"]
         if not pts:
             continue
         x = [p["budget"] for p in pts]
@@ -940,7 +1020,7 @@ def _plot(summary: dict, path: Path) -> None:
             [p["mean_delta_r5"] for p in mean_pts],
             color="black",
             lw=2,
-            label="3-seed mean (stratified, p=0)",
+            label=f"{len(summary['primary']['seeds'])}-seed mean (stratified, p=0)",
         )
     ax.axhline(summary["baseline"]["target_delta_r5"], color="red", ls="--", label="target R@5 0.887")
     ax.axhline(0.0, color="gray", ls=":", label="baseline")
