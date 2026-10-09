@@ -1180,3 +1180,27 @@ def test_cli_curve_plan_and_hypothesis(env):
     # no --plan: the options keep their H1 defaults
     help_out = runner.invoke(app, ["curve", "--help"]).output
     assert "--plan" in help_out and "H1-rerank-r5" in help_out
+
+
+def test_a_non_rectangular_custom_plan_is_refused(grid):
+    plan = c6_plan()
+    # drop one key: noise 0.1 then lacks a seed/budget the primary condition has
+    with pytest.raises(CurveError, match="every condition x seed x budget"):
+        run(grid, None, run_id="x", plan=plan[:-1], hypothesis_id=C6_ID)
+    # a seed planned only for one condition would inflate the other condition's denominator
+    extra = curve.Key("stratified", 0.1, 9, 100)
+    with pytest.raises(CurveError, match="every condition x seed x budget"):
+        run(grid, None, run_id="x", plan=[*plan, extra], hypothesis_id=C6_ID)
+
+
+def test_non_reach_label_names_the_largest_planned_budget():
+    pts = [
+        {"budget": 100, "status": "completed", "r5": 0.80},
+        {"budget": 200, "status": "completed", "r5": 0.81},
+    ]
+    first = curve.first_observed_point(pts)
+    assert first["verdict"] == "not_reached"
+    assert first["label"] == "지정 지점 200까지 도달 관측 없음"
+    # the 108-key contract plan ends at 3,000: the label is unchanged
+    full = [{"budget": b, "status": "completed", "r5": 0.80} for b in curve.BUDGETS]
+    assert curve.first_observed_point(full)["label"] == curve.NOT_REACHED_TEXT
