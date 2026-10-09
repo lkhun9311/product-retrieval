@@ -1,0 +1,110 @@
+[
+ {
+  "policy": "stratified",
+  "noise": 0.0,
+  "seed": 3,
+  "budget": 100
+ },
+ {
+  "policy": "stratified",
+  "noise": 0.0,
+  "seed": 3,
+  "budget": 3000
+ },
+ {
+  "policy": "stratified",
+  "noise": 0.0,
+  "seed": 4,
+  "budget": 100
+ },
+ {
+  "policy": "stratified",
+  "noise": 0.0,
+  "seed": 4,
+  "budget": 3000
+ },
+ {
+  "policy": "stratified",
+  "noise": 0.0,
+  "seed": 5,
+  "budget": 100
+ },
+ {
+  "policy": "stratified",
+  "noise": 0.0,
+  "seed": 5,
+  "budget": 3000
+ },
+ {
+  "policy": "stratified",
+  "noise": 0.1,
+  "seed": 3,
+  "budget": 100
+ },
+ {
+  "policy": "stratified",
+  "noise": 0.1,
+  "seed": 3,
+  "budget": 3000
+ },
+ {
+  "policy": "stratified",
+  "noise": 0.1,
+  "seed": 4,
+  "budget": 100
+ },
+ {
+  "policy": "stratified",
+  "noise": 0.1,
+  "seed": 4,
+  "budget": 3000
+ },
+ {
+  "policy": "stratified",
+  "noise": 0.1,
+  "seed": 5,
+  "budget": 100
+ },
+ {
+  "policy": "stratified",
+  "noise": 0.1,
+  "seed": 5,
+  "budget": 3000
+ },
+ {
+  "policy": "stratified",
+  "noise": 0.2,
+  "seed": 3,
+  "budget": 100
+ },
+ {
+  "policy": "stratified",
+  "noise": 0.2,
+  "seed": 3,
+  "budget": 3000
+ },
+ {
+  "policy": "stratified",
+  "noise": 0.2,
+  "seed": 4,
+  "budget": 100
+ },
+ {
+  "policy": "stratified",
+  "noise": 0.2,
+  "seed": 4,
+  "budget": 3000
+ },
+ {
+  "policy": "stratified",
+  "noise": 0.2,
+  "seed": 5,
+  "budget": 100
+ },
+ {
+  "policy": "stratified",
+  "noise": 0.2,
+  "seed": 5,
+  "budget": 3000
+ }
+]
