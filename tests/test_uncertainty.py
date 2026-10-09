@@ -876,3 +876,188 @@ def test_oracle_and_stratified_pairs_match_the_simulator(grid):  # noqa: F811
     labels, _ = build_labels(got)
     assert len(labels) == 120
     assert FakeVectors  # fixture helper imported for the grid
+
+
+# ---- review fixes: shared inputs, bounded selection failures, recoverable round record ---------------
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        ("rankings_sha256", "train"),
+        ("cand_stats_sha256", "train"),
+        ("cand_stats_sha256", "val"),
+        ("index_id", "train"),
+        ("index_id", "val"),
+        ("embed_model_id", None),
+        ("config_name", None),
+        ("embedder", None),
+    ],
+)
+def test_compare_aborts_when_the_runs_used_different_frozen_inputs(grid, frozen, both, path):  # noqa: F811
+    pins, _ = both
+    compare(grid, frozen, pins)  # positive control: the real pair compares fine
+    plan_path = grid.out_root / "u" / "plan.json"
+    original = plan_path.read_text()
+    plan = json.loads(original)
+    key, sub = path
+    if sub is None:
+        plan["inputs"][key] = "something-else"
+    else:
+        plan["inputs"][key][sub] = "0" * 64
+    plan_path.write_text(json.dumps(plan))
+    with pytest.raises(h2_compare.CompareAbort, match="the two runs differ in"):
+        compare(grid, frozen, pins)
+    plan_path.write_text(original)
+
+
+def test_a_different_train_rankings_hash_aborts_although_the_initial_weights_are_identical(
+    grid,  # noqa: F811
+    frozen,
+    both,
+):
+    pins, srecs = both
+    urecs = {r["budget"]: r for r in u_lines(grid)}
+    ms = v2.load_model(grid.out_root / "s" / "models" / srecs[100]["reranker_version"] / "model.json")
+    mu = v2.load_model(grid.out_root / "u" / "models" / urecs[100]["reranker_version"] / "model.json")
+    assert all(torch.equal(ms["state_dict"][k], mu["state_dict"][k]) for k in ms["state_dict"])
+    plan_path = grid.out_root / "u" / "plan.json"
+    plan = json.loads(plan_path.read_text())
+    plan["inputs"]["rankings_sha256"]["train"] = "f" * 64
+    plan_path.write_text(json.dumps(plan))
+    with pytest.raises(h2_compare.CompareAbort, match="train rankings sha256"):
+        compare(grid, frozen, pins)
+    assert not (grid.out_root / "u" / "h2_comparison.json").exists()
+
+
+def fail_selection(monkeypatch, errors):
+    """Make select_next_batch raise ``errors[i]`` on call i (None = work normally)."""
+    real = uncertainty_path.select_next_batch
+    calls = {"n": 0}
+
+    def fake(*a, **k):
+        i = calls["n"]
+        calls["n"] += 1
+        if i < len(errors) and errors[i] is not None:
+            raise errors[i]
+        return real(*a, **k)
+
+    monkeypatch.setattr(uncertainty_path, "select_next_batch", fake)
+    return real, calls
+
+
+def sel_lines(g):
+    return [r for r in u_lines(g) if r.get("stage") == "selection"]
+
+
+def test_selection_os_error_is_recorded_and_retried_once(grid, frozen, monkeypatch):  # noqa: F811
+    fail_selection(monkeypatch, [OSError("disk hiccup")])
+    res = u_run(grid, frozen)
+    (bad,) = sel_lines(grid)
+    assert (bad["stage"], bad["attempt"], bad["status"], bad["retryable"]) == ("selection", 1, "failed", True)
+    assert bad["error_type"] == "OSError" and "disk hiccup" in bad["error"]
+    assert bad["key_id"] == "uncertainty|p0|s0|B100|selection" and bad["round"] == 0
+    assert (res["completed"], res["failed"]) == (3, 1)
+    assert len(load_events(grid.out_root / "u" / "events" / "uncertainty.seed0.jsonl")) == 160
+    assert [(x["from_size"], x["to_size"]) for x in u_lines(grid, name="rounds.jsonl")] == [
+        (100, 130),
+        (130, 160),
+    ]
+
+
+def test_selection_os_error_twice_stops_the_seed_and_resume_does_not_retry_again(grid, frozen, monkeypatch):  # noqa: F811
+    _, calls = fail_selection(monkeypatch, [OSError("a"), OSError("b")])
+    res = u_run(grid, frozen)
+    assert [(r["attempt"], r["retryable"]) for r in sel_lines(grid)] == [(1, True), (2, True)]
+    assert calls["n"] == 2 and res["completed"] == 1
+    ev = grid.out_root / "u" / "events" / "uncertainty.seed0.jsonl"
+    assert len(ev.read_text().splitlines()) == 100
+    before = (grid.out_root / "u" / "runs.jsonl").read_bytes()
+    monkeypatch.undo()  # a working selector must still not be asked again
+    assert u_run(grid, frozen)["attempted"] == 0
+    assert (grid.out_root / "u" / "runs.jsonl").read_bytes() == before
+    assert len(ev.read_text().splitlines()) == 100
+
+
+def test_selection_deterministic_error_stops_the_seed_with_the_record_kept(grid, frozen, monkeypatch):  # noqa: F811
+    _, calls = fail_selection(monkeypatch, [ValueError("bad probabilities")])
+    res = u_run(grid, frozen, seeds=(0, 1))
+    (bad,) = [r for r in sel_lines(grid) if r["seed"] == 0]
+    assert (bad["attempt"], bad["retryable"], bad["error_type"]) == (1, False, "ValueError")
+    # seed 0 stops after one call; seed 1 is independent and runs to the end
+    assert calls["n"] == 1 + 2
+    assert res["failed"] == 1
+    assert [r["status"] for r in u_lines(grid) if r["seed"] == 0 and r.get("stage") != "selection"] == [
+        "completed"
+    ]
+    monkeypatch.undo()
+    assert u_run(grid, frozen, seeds=(0, 1))["attempted"] == 0
+
+
+def test_oracle_error_in_the_selection_transition_is_recorded_too(grid, frozen, monkeypatch):  # noqa: F811
+    real = sim.Oracle.answer
+    state = {"n": 0}
+
+    def once(self, pairs, first_index=0):
+        state["n"] += 1  # the first call answers I_s; the next one is the first selection round
+        if state["n"] == 1:
+            return real(self, pairs, first_index)
+        raise ValueError("oracle down")
+
+    monkeypatch.setattr(sim.Oracle, "answer", once)
+    u_run(grid, frozen)
+    (bad,) = sel_lines(grid)
+    assert "oracle down" in bad["error"] and bad["retryable"] is False
+
+
+def test_selection_retry_count_survives_a_crash_in_the_retry(grid, frozen, monkeypatch):  # noqa: F811
+    fail_selection(monkeypatch, [OSError("first"), KeyboardInterrupt()])
+    with pytest.raises(KeyboardInterrupt):
+        u_run(grid, frozen)
+    assert [r["attempt"] for r in sel_lines(grid)] == [1]
+    # resume: exactly one more attempt is allowed; it fails again, then the seed stops for good
+    fail_selection(monkeypatch, [OSError("second")])
+    u_run(grid, frozen)
+    assert [r["attempt"] for r in sel_lines(grid)] == [1, 2]
+    monkeypatch.undo()
+    assert u_run(grid, frozen)["attempted"] == 0
+    assert [r["attempt"] for r in sel_lines(grid)] == [1, 2]
+
+
+def test_crash_between_the_events_file_and_the_round_record_is_repaired_on_resume(
+    grid,  # noqa: F811
+    frozen,
+    monkeypatch,
+):
+    u_run(grid, frozen, run_id="whole")
+    real_append = curve._append_line
+    state = {"armed": True}
+
+    def crashing(path, obj):
+        if state["armed"] and path.name == "rounds.jsonl":
+            state["armed"] = False
+            raise KeyboardInterrupt  # dies after the events file moved on, before the round record
+        return real_append(path, obj)
+
+    monkeypatch.setattr(curve, "_append_line", crashing)
+    with pytest.raises(KeyboardInterrupt):
+        u_run(grid, frozen, run_id="part")
+    monkeypatch.undo()
+    ev = grid.out_root / "part" / "events" / "uncertainty.seed0.jsonl"
+    assert len(ev.read_text().splitlines()) == 130
+    assert not (grid.out_root / "part" / "rounds.jsonl").exists()  # the record really was lost
+    u_run(grid, frozen, run_id="part")
+    got = u_lines(grid, "part", "rounds.jsonl")
+    want = u_lines(grid, "whole", "rounds.jsonl")
+    assert [x["round"] for x in got] == [1, 2]  # one record per round, none doubled
+    skip = {"selection_seconds", "finished_at", "reconstructed"}
+    assert [{k: v for k, v in x.items() if k not in skip} for x in got] == [
+        {k: v for k, v in x.items() if k not in skip} for x in want
+    ]
+    assert got[0]["reconstructed"] is True and got[0]["selection_seconds"] is None
+    assert got[1]["reconstructed"] is False and isinstance(got[1]["selection_seconds"], float)
+    assert ev.read_bytes() == (grid.out_root / "whole" / "events" / "uncertainty.seed0.jsonl").read_bytes()
+    # a third resume writes nothing more
+    before = (grid.out_root / "part" / "rounds.jsonl").read_bytes()
+    assert u_run(grid, frozen, run_id="part")["attempted"] == 0
+    assert (grid.out_root / "part" / "rounds.jsonl").read_bytes() == before

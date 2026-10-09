@@ -273,6 +273,7 @@ def _run_point(
         "hypothesis_id": HYPOTHESIS_ID,
         "preregistration": PREREGISTRATION,
         "policy": POLICY,
+        "stage": "train_eval",
         "round": round_,
         "n_events": len(events),
         "error": None,
@@ -493,6 +494,8 @@ def _run_seed(
                 f"seed {seed}: point {points[earlier]} record does not match the events file"
             )
 
+    _ensure_rounds(seed, points, j, events, existing, rounds_path)
+
     while True:
         key = key_for(seed, points[j])
         attempts = existing[key.id]
@@ -514,8 +517,32 @@ def _run_seed(
                 continue  # retried by _next_attempt if it was an OSError, else the loop returns
         if j == len(points) - 1:
             return
-        n_take = points[j + 1] - points[j]
-        t0 = time.perf_counter()
+        sel_key = f"{key.id}|selection"
+        sel_attempts = existing[sel_key]
+        sel_attempt = curve._next_attempt(sel_attempts)
+        if sel_attempt is None:
+            return  # a deterministic selection failure (or the retry is used up): the path ends here
+        new, t_select, err = _select_round(ctx, oracle, model, events, points[j + 1] - points[j])
+        if err is not None:
+            rec = _selection_failure(sel_key, key, seed, j, sel_attempt, err, commit, len(events))
+            curve._append_line(runs_path, rec)
+            sel_attempts.append(rec)
+            result["attempted"] += 1
+            result["failed"] += 1
+            continue  # retried through _next_attempt only for an OSError, at most once
+        events = events + new
+        _write_events_atomic(events, ev_path)  # the state moves here ...
+        # ... and a crash before the next line is repaired on resume by _ensure_rounds
+        curve._append_line(
+            rounds_path, _round_record(seed, j + 1, points, new, model["reranker_version"], t_select)
+        )
+        j += 1
+
+
+def _select_round(ctx, oracle, model, events, n_take):
+    """Score the pool, select and ask the oracle. Returns (new events, seconds, None) or (None, 0, error)."""
+    t0 = time.perf_counter()
+    try:
         batch = select_next_batch(
             model,
             ctx.pool,
@@ -527,29 +554,73 @@ def _run_seed(
             n_take,
             ctx.score_chunk,
         )
-        t_select = time.perf_counter() - t0
         new = oracle.answer(list(batch), first_index=len(events))
-        events = events + new
-        _write_events_atomic(events, ev_path)
-        n_pos = sum(e.action == "match" for e in new)
+    except Exception as exc:  # noqa: BLE001 - recorded like a failed point
+        return None, 0.0, exc
+    return new, time.perf_counter() - t0, None
+
+
+def _selection_failure(sel_key, key, seed, j, attempt, exc, commit, n_events) -> dict:
+    """A failed selection transition, in runs.jsonl under its own key (the point's key + ``|selection``)."""
+    now = curve._now()
+    return {
+        "key_id": sel_key,
+        "policy": POLICY,
+        "noise": 0.0,
+        "seed": seed,
+        "budget": key.budget,
+        "attempt": attempt,
+        "status": "failed",
+        "stage": "selection",
+        "started_at": now,
+        "finished_at": now,
+        "code_commit": commit,
+        "hypothesis_id": HYPOTHESIS_ID,
+        "preregistration": PREREGISTRATION,
+        "round": j,
+        "n_events": n_events,
+        "error": f"{type(exc).__name__}: {exc}"[:2000],
+        "error_type": type(exc).__name__,
+        "retryable": isinstance(exc, OSError),
+    }
+
+
+def _round_record(seed, round_, points, new, model_version, t_select, reconstructed=False) -> dict:
+    n_pos = sum(e.action == "match" for e in new)
+    return {
+        "hypothesis_id": HYPOTHESIS_ID,
+        "seed": seed,
+        "round": round_,
+        "from_size": points[round_ - 1],
+        "to_size": points[round_],
+        "n_selected": len(new),
+        "batch_pos": n_pos,
+        "batch_neg": len(new) - n_pos,
+        "batch_pos_share": n_pos / len(new) if new else None,
+        "selection_seconds": None if t_select is None else round(t_select, 3),
+        "reconstructed": reconstructed,
+        "model_version": model_version,
+        "finished_at": curve._now(),
+    }
+
+
+def _ensure_rounds(seed, points, j, events, existing, rounds_path) -> None:
+    """Rebuild round records lost to a crash between the events file and rounds.jsonl.
+
+    Chosen over writing the record first: the events file is the state, so a record is derived from it. A
+    rebuilt record has ``reconstructed = true`` and ``selection_seconds = null`` (the time is unknown).
+    """
+    have = {x["round"] for x in read_rounds(rounds_path) if x["seed"] == seed}
+    for r in range(1, j + 1):
+        if r in have:
+            continue
+        done = [a for a in existing[key_for(seed, points[r - 1]).id] if a["status"] == "completed"]
         curve._append_line(
             rounds_path,
-            {
-                "hypothesis_id": HYPOTHESIS_ID,
-                "seed": seed,
-                "round": j + 1,
-                "from_size": points[j],
-                "to_size": points[j + 1],
-                "n_selected": len(new),
-                "batch_pos": n_pos,
-                "batch_neg": len(new) - n_pos,
-                "batch_pos_share": n_pos / len(new) if new else None,
-                "selection_seconds": round(t_select, 3),
-                "model_version": model["reranker_version"],
-                "finished_at": curve._now(),
-            },
+            _round_record(
+                seed, r, points, events[points[r - 1] : points[r]], done[0]["reranker_version"], None, True
+            ),
         )
-        j += 1
 
 
 def read_rounds(path: Path) -> list[dict]:

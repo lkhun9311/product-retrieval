@@ -49,6 +49,18 @@ VERDICT_RAISED = "uncertainty selection raised R@5 over stratified at 3,000 labe
 VERDICT_LOWERED = "uncertainty selection lowered R@5 below stratified at 3,000 labels on these seeds"
 VERDICT_NONE = "no consistent difference between the two policies at 3,000 labels"
 VERDICT_INCOMPLETE = "undetermined: incomplete"
+# (label, getter on a plan's "inputs") compared between the curve run and the uncertainty run
+SHARED_INPUTS: tuple[tuple[str, Callable[[dict], Any]], ...] = (
+    ("train rankings sha256", lambda i: i.get("rankings_sha256", {}).get("train")),
+    ("val rankings sha256", lambda i: i.get("rankings_sha256", {}).get("val")),
+    ("train cand-stats sha256", lambda i: i.get("cand_stats_sha256", {}).get("train")),
+    ("val cand-stats sha256", lambda i: i.get("cand_stats_sha256", {}).get("val")),
+    ("train index id", lambda i: i.get("index_id", {}).get("train")),
+    ("val index id", lambda i: i.get("index_id", {}).get("val")),
+    ("embed model id", lambda i: i.get("embed_model_id")),
+    ("embedder", lambda i: i.get("embedder")),
+    ("config name", lambda i: i.get("config_name")),
+)
 VectorLoader = Callable[[str, list[str], str], Any]
 
 
@@ -158,6 +170,16 @@ def compare_h2(
         raise CompareAbort(f"{uncertainty_dir} is not an {HYPOTHESIS_ID} run")
     if c_plan.get("hypothesis_id") != curve.HYPOTHESIS_ID:
         raise CompareAbort(f"{curve_dir} is not an {curve.HYPOTHESIS_ID} run")
+
+    # both runs must have trained and evaluated on the same frozen inputs (hashes, indexes, embedder, config)
+    c_in, u_in = c_plan["inputs"], u_plan["inputs"]
+    for label, got in SHARED_INPUTS:
+        c_val, u_val = got(c_in), got(u_in)
+        if c_val is None or u_val is None or c_val != u_val:
+            raise CompareAbort(
+                f"the two runs differ in {label}: curve {c_val!r} vs uncertainty {u_val!r}; "
+                "they must use the same frozen inputs"
+            )
 
     val_rankings, val_cand_stats = Path(val_rankings), Path(val_cand_stats)
     val_sha, cs_sha = sha256_file(val_rankings), sha256_file(val_cand_stats)
