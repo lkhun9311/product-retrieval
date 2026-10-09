@@ -61,7 +61,7 @@ First point with R@5 >= 0.887 (secondary, not used for the verdict):
 | 2 | 3,000 | 1347 (44.9%) | 163 (5.4%) |
 
 ## Reading
-- Uncertainty selection picks pairs the reranker scores near 0.5, and about 40–46% of those are correct products by 3,000 labels, against about 5% under stratified selection. The reranker sees many more positives, but the same candidates near its own boundary.
+- Uncertainty selection picks pairs the reranker scores near 0.5, and 44.0–45.8% of the 3,000 labels are positives, against 4.4–5.9% under stratified selection. The reranker sees many more positives, but the same candidates near its own boundary.
 - Seed 1 fell below stratified from 200 labels onward and stayed there; seeds 0 and 2 were above stratified between 1,000 and 2,000 labels. With batches of 100–1,000, one early batch shapes the rest of the path.
 - R@1 was higher under uncertainty for seeds 0 and 2 at most points; the verdict uses R@5 only.
 - These uncertainty-trained models would all fail the deployment gate's G3 (positive share above 0.10), and they are outside G3's scope by design (c6 §3 covers stratified only). A gate for this policy needs its own reference.
