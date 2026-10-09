@@ -153,6 +153,7 @@ def _judge(
     seed: int,
     noise: float,
     rankings_sha256: str,
+    first_index: int = 0,
 ) -> list[FeedbackEvent]:
     ns = make_namespace(rankings_sha256, noise)
     base = namespace_base(rankings_sha256)
@@ -163,7 +164,7 @@ def _judge(
         events.append(
             FeedbackEvent(
                 event_id=event_id(ns, policy_id, seed, pair.query_id, pair.product_id),
-                ts=EPOCH + timedelta(seconds=i),
+                ts=EPOCH + timedelta(seconds=first_index + i),
                 session_id=f"sim-{policy_id}-{seed}",
                 list_id=_hash("list", ns, policy_id, seed, pair.query_id),
                 query_id=pair.query_id,
@@ -234,6 +235,49 @@ def simulate_stratified(
         noise=noise,
         rankings_sha256=rankings_sha256,
     )
+
+
+def stratified_pairs(
+    rankings: list[dict], *, budget: int, seed: int, exposed_k: int = DEFAULT_EXPOSED_K
+) -> list[tuple[str, str, int]]:
+    """The first ``budget`` (query_id, product_id, position) of the stratified order; truth is not read."""
+    if exposed_k != 20:
+        raise SimulationError(f"stratified requires exposed_k == 20, got {exposed_k}")
+    _validate(rankings, exposed_k, require_full=True)
+    return [(p.query_id, p.product_id, p.position) for p in _stratified_order(rankings, budget, seed)]
+
+
+class Oracle:
+    """Answers chosen pairs from the truth. The one place the uncertainty path reads ``truth_product_id``.
+
+    Answers and noise are the c4-v3 rules of ``_judge``; ``first_index`` continues the event clock so a
+    path built round by round has the timestamps of a single run.
+    """
+
+    def __init__(
+        self,
+        rankings: list[dict],
+        *,
+        rankings_sha256: str,
+        seed: int,
+        policy_id: str,
+        noise: float = 0.0,
+        exposed_k: int = DEFAULT_EXPOSED_K,
+    ):
+        _check_args(0, exposed_k, noise)
+        _validate(rankings, exposed_k, require_full=True)
+        self._truth = {r["query_id"]: r["truth_product_id"] for r in rankings}
+        self._exposed = {r["query_id"]: list(r["top_k_product_ids"][:exposed_k]) for r in rankings}
+        self._kw = {"policy_id": policy_id, "seed": seed, "noise": noise, "rankings_sha256": rankings_sha256}
+
+    def answer(self, pairs: list[tuple[str, str, int]], first_index: int = 0) -> list[FeedbackEvent]:
+        selected = []
+        for qid, pid, pos in pairs:
+            exposed = self._exposed.get(qid)
+            if exposed is None or pos < 1 or pos > len(exposed) or exposed[pos - 1] != pid:
+                raise SimulationError(f"pair ({qid!r}, {pid!r}, position {pos}) is not in the exposed pool")
+            selected.append(_Pair(qid, pid, pos, False))
+        return _judge(selected, self._truth, first_index=first_index, **self._kw)
 
 
 def stratum_of(position: int) -> int:
