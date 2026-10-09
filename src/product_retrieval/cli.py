@@ -1,7 +1,7 @@
 """D20 section 7 CLI.
 
 `pr build-index | eval | cand-stats | simulate | labels | train-rerank | rerank | curve | gate | serve`
-(plus `curve-summary`).
+(plus `curve-summary`, `uncertainty-path`, `h2-compare`).
 """
 
 from __future__ import annotations
@@ -44,8 +44,10 @@ from product_retrieval.pipelines.curve import (
     summarize,
 )
 from product_retrieval.pipelines.evaluate import IndexNotFoundError, format_report_table, run_eval
+from product_retrieval.pipelines.h2_compare import compare_h2
 from product_retrieval.pipelines.ikea_check import IkeaCheckError, format_ikea_table, run_ikea_check
 from product_retrieval.pipelines.selection import TestSplitAccessError
+from product_retrieval.pipelines.uncertainty_path import run_uncertainty_path
 from product_retrieval.rerank import v0 as rerank_v0
 from product_retrieval.rerank import v1 as rerank_v1
 from product_retrieval.rerank import v2 as rerank_v2
@@ -815,6 +817,106 @@ def curve_summary(
         f"completed {c['completed']} failed {c['failed']} not run {c['not_run']} of {c['planned']}; "
         f"{summary['primary']['result']['sentence']} ({summary['primary']['result']['seed_points']})"
     )
+
+
+@app.command("uncertainty-path")
+def uncertainty_path_cmd(
+    config: Annotated[
+        Path, typer.Option("--config", exists=True, dir_okay=False, help="experiment YAML (core.config)")
+    ],
+    train_rankings: Annotated[
+        Path, typer.Option("--train-rankings", exists=True, dir_okay=False, help="train rankings JSONL")
+    ],
+    val_rankings: Annotated[
+        Path, typer.Option("--val-rankings", exists=True, dir_okay=False, help="val rankings JSONL")
+    ],
+    train_cand_stats: Annotated[
+        Path, typer.Option("--train-cand-stats", exists=True, dir_okay=False, help="train cand-stats JSONL")
+    ],
+    val_cand_stats: Annotated[
+        Path, typer.Option("--val-cand-stats", exists=True, dir_okay=False, help="val cand-stats JSONL")
+    ],
+    run_id: Annotated[str, typer.Option("--run-id", help="run directory name; reuse it to resume")],
+    seed: Annotated[
+        list[int] | None, typer.Option("--seed", help="seed; repeat for several (default 0 1 2)")
+    ] = None,
+    out_root: Annotated[Path, typer.Option("--out-root", help="root for runs")] = Path("reports/uncertainty"),
+    embedder: Annotated[
+        str, typer.Option("--embedder", help="embedder: siglip (default) or fake")
+    ] = "siglip",
+    artifacts_root: Annotated[
+        Path, typer.Option("--artifacts-root", help="root for embeddings/index artifacts")
+    ] = Path("artifacts"),
+) -> None:
+    """Uncertainty label-selection path, H2-uncertainty (contract c4-uncertainty v1); never opens test."""
+    try:
+        result = run_uncertainty_path(
+            load_config(config),
+            train_rankings,
+            val_rankings,
+            train_cand_stats,
+            val_cand_stats,
+            out_root,
+            run_id,
+            seeds=tuple(seed) if seed else (0, 1, 2),
+            embedder=embedder,
+            artifacts_root=artifacts_root,
+        )
+    except (CurveError, SimulationError, LabelBuildError, *V2_ERRORS) as exc:
+        typer.echo(f"uncertainty-path: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+    typer.echo(
+        f"run {result['run_id']}: attempted {result['attempted']} "
+        f"(completed {result['completed']}, failed {result['failed']}) -> {result['run_dir']}"
+    )
+    if result["failed"]:
+        raise typer.Exit(code=3)
+
+
+@app.command("h2-compare")
+def h2_compare_cmd(
+    uncertainty_run: Annotated[
+        Path, typer.Option("--uncertainty-run", exists=True, file_okay=False, help="uncertainty run dir")
+    ],
+    curve_run: Annotated[
+        Path, typer.Option("--curve-run", exists=True, file_okay=False, help="curve-v1 run dir")
+    ],
+    config: Annotated[
+        Path, typer.Option("--config", exists=True, dir_okay=False, help="experiment YAML (core.config)")
+    ],
+    val_rankings: Annotated[
+        Path, typer.Option("--val-rankings", exists=True, dir_okay=False, help="val rankings JSONL")
+    ],
+    val_cand_stats: Annotated[
+        Path, typer.Option("--val-cand-stats", exists=True, dir_okay=False, help="val cand-stats JSONL")
+    ],
+    out_dir: Annotated[
+        Path | None,
+        typer.Option("--out-dir", help="where to write h2_comparison.json/.md (default: the run)"),
+    ] = None,
+    embedder: Annotated[
+        str, typer.Option("--embedder", help="embedder: siglip (default) or fake")
+    ] = "siglip",
+    artifacts_root: Annotated[
+        Path, typer.Option("--artifacts-root", help="root for embeddings/index artifacts")
+    ] = Path("artifacts"),
+) -> None:
+    """Compare the uncertainty path with the curve-v1 stratified models (c4-uncertainty v1 section 4)."""
+    try:
+        result = compare_h2(
+            uncertainty_run,
+            curve_run,
+            load_config(config),
+            val_rankings,
+            val_cand_stats,
+            out_dir,
+            embedder,
+            artifacts_root,
+        )
+    except (CurveError, SimulationError, *V2_ERRORS) as exc:
+        typer.echo(f"h2-compare: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+    typer.echo(result["verdict"]["sentence"])
 
 
 def _gate_error_output(kind: str, message: str) -> dict:
