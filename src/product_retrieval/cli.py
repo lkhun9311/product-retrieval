@@ -1,7 +1,7 @@
 """D20 section 7 CLI.
 
 `pr build-index | eval | cand-stats | simulate | labels | train-rerank | rerank | curve | gate | serve`
-(plus `curve-summary`, `uncertainty-path`, `h2-compare`).
+(plus `curve-summary`, `uncertainty-path`, `h2-compare`, `deepfurniture-crop`).
 """
 
 from __future__ import annotations
@@ -17,6 +17,7 @@ from product_retrieval.core.config import DEFAULT_DATA_ROOT, load_config
 from product_retrieval.core.ids import sha256_file
 from product_retrieval.data.checks import check_manifest
 from product_retrieval.data.deepfurniture import DeepFurnitureError, build_manifest
+from product_retrieval.data.deepfurniture_scenes import SceneBoxError, ScenePopulationError
 from product_retrieval.data.manifest import load_manifest
 from product_retrieval.data.store import ImageStore
 from product_retrieval.eval.bootstrap import paired_bootstrap
@@ -42,6 +43,12 @@ from product_retrieval.pipelines.curve import (
     read_plan_file,
     run_curve,
     summarize,
+)
+from product_retrieval.pipelines.deepfurniture_crop import (
+    SIGLIP_REVISION,
+    DeepFurnitureCropError,
+    format_console,
+    run_deepfurniture_crop,
 )
 from product_retrieval.pipelines.evaluate import IndexNotFoundError, format_report_table, run_eval
 from product_retrieval.pipelines.h2_compare import compare_h2
@@ -251,6 +258,71 @@ def crop_search_cmd(
 
     typer.echo(format_crop_table(result.report))
     typer.echo(f"report: {result.report_path}")
+
+
+@app.command("deepfurniture-crop")
+def deepfurniture_crop_cmd(
+    run_id: Annotated[str, typer.Option("--run-id", help="name of the run folder (never reused)")],
+    raw: Annotated[
+        Path,
+        typer.Option(
+            "--raw", file_okay=False, help="DeepFurniture folder (data/scenes, data/metadata, manifest)"
+        ),
+    ] = DEFAULT_DATA_ROOT / "deepfurniture",
+    data_root: Annotated[
+        Path, typer.Option("--data-root", file_okay=False, help="root of the content-addressed image store")
+    ] = DEFAULT_DATA_ROOT,
+    manifest: Annotated[
+        Path | None,
+        typer.Option("--manifest", dir_okay=False, help="default: <raw>/manifest_deepfurniture.jsonl"),
+    ] = None,
+    out_root: Annotated[
+        Path, typer.Option("--out-root", help="runs are written to <out-root>/<run-id>/")
+    ] = Path("reports/crop"),
+    embedder: Annotated[str, typer.Option("--embedder", help="siglip (default) or fake")] = "siglip",
+    detector: Annotated[str, typer.Option("--detector", help="owl (default) or fake")] = "owl",
+    siglip_revision: Annotated[
+        str, typer.Option("--siglip-revision", help="SigLIP2 model and processor revision")
+    ] = SIGLIP_REVISION,
+    population_only: Annotated[
+        bool, typer.Option("--population-only", help="build and assert the population, then stop (no models)")
+    ] = False,
+) -> None:
+    """Whole scene vs detector vs GT boxes on DeepFurniture scenes (see docs/contracts)."""
+    if embedder not in ("siglip", "fake"):
+        typer.echo(
+            f"deepfurniture-crop: unknown --embedder {embedder!r}; expected 'siglip' or 'fake'", err=True
+        )
+        raise typer.Exit(code=2)
+    if detector not in ("owl", "fake"):
+        typer.echo(f"deepfurniture-crop: unknown --detector {detector!r}; expected 'owl' or 'fake'", err=True)
+        raise typer.Exit(code=2)
+    try:
+        result = run_deepfurniture_crop(
+            raw,
+            data_root,
+            run_id,
+            out_root=out_root,
+            manifest_path=manifest,
+            embedder_name=embedder,  # type: ignore[arg-type]
+            detector=detector,  # type: ignore[arg-type]
+            siglip_revision=siglip_revision,
+            population_only=population_only,
+        )
+    except (
+        DeepFurnitureCropError,
+        CropSearchError,
+        IkeaCheckError,
+        ScenePopulationError,
+        SceneBoxError,
+        FileExistsError,
+    ) as exc:
+        typer.echo(f"deepfurniture-crop: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+
+    typer.echo(format_console(result.report))
+    typer.echo(f"report: {result.report_path}")
+    typer.echo(f"summary: {result.summary_path}")
 
 
 @app.command("eval")

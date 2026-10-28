@@ -37,15 +37,19 @@ class SiglipEmbedder:
         model_id: str = "google/siglip2-base-patch16-224",
         device: str = "cpu",
         batch_size: int = 32,
+        revision: str | None = None,
     ) -> None:
         self.model_id = model_id
         self.device = device
         self.batch_size = batch_size
+        self.revision = revision  # None = whatever the default branch resolves to (unpinned)
 
-        self._model = AutoModel.from_pretrained(model_id)
+        # With no revision the calls are exactly what they were before the parameter existed.
+        kwargs = {} if revision is None else {"revision": revision}
+        self._model = AutoModel.from_pretrained(model_id, **kwargs)
         self._model.to(device)
         self._model.eval()
-        self._processor = AutoProcessor.from_pretrained(model_id)
+        self._processor = AutoProcessor.from_pretrained(model_id, **kwargs)
 
         # Determine the projected image-feature dimension by running one dummy
         # image through the model, rather than guessing a config attribute name.

@@ -176,6 +176,37 @@ def _new_run_id() -> str:
     return f"{datetime.now(UTC):%Y%m%dT%H%M%S%fZ}-{uuid.uuid4().hex[:8]}"
 
 
+def check_crops(crops: list[Crop], size: tuple[int, int], label: str) -> None:
+    """Every crop lies inside the ``(width, height)`` image and is at least ``MIN_CROP_PX`` on both sides."""
+    width, height = size
+    for c in crops:
+        x1, y1, x2, y2 = c.box
+        if not (0 <= x1 and 0 <= y1 and x2 <= width and y2 <= height):
+            raise CropSearchError(f"{label}: crop {c.box} outside the {size} image")
+        if x2 - x1 < MIN_CROP_PX or y2 - y1 < MIN_CROP_PX:
+            raise CropSearchError(f"{label}: crop {c.box} is under {MIN_CROP_PX} px")
+
+
+def detect_crops(det: Detector, image: Image.Image, label: str) -> tuple[list[Crop], float]:
+    """Run the detector on an EXIF-transposed RGB image; check its crops. Returns crops and seconds."""
+    t0 = time.perf_counter()
+    crops = det.detect(image)
+    seconds = time.perf_counter() - t0
+    check_crops(crops, image.size, label)
+    return crops, seconds
+
+
+def rank_vector(gallery: np.ndarray, product_ids: list[str], vec: np.ndarray) -> list[str]:
+    """Rank the gallery by cosine for one query vector.
+
+    ``gallery`` rows are in ascending product id and the sort is stable, so ties go to the smaller id.
+    """
+    sims = gallery @ vec.astype(np.float32)
+    if not np.isfinite(sims).all():
+        raise CropSearchError("similarity vector contains NaN or inf")
+    return [product_ids[j] for j in np.argsort(-sims, kind="stable")]
+
+
 def run_crop_search(
     raw_root: Path,
     embedder_name: str = "siglip",
@@ -240,15 +271,8 @@ def run_crop_search(
         if exif_orientation(path) != 1:
             exif_rotated.append(rid)
         image = load_exif_rgb(path)
-        t0 = time.perf_counter()
-        crops = det.detect(image)
-        det_secs.append(time.perf_counter() - t0)
-        for c in crops:
-            x1, y1, x2, y2 = c.box
-            if not (0 <= x1 and 0 <= y1 and x2 <= image.width and y2 <= image.height):
-                raise CropSearchError(f"room {rid!r}: crop {c.box} outside the {image.size} image")
-            if x2 - x1 < MIN_CROP_PX or y2 - y1 < MIN_CROP_PX:
-                raise CropSearchError(f"room {rid!r}: crop {c.box} is under {MIN_CROP_PX} px")
+        crops, seconds = detect_crops(det, image, f"room {rid!r}")
+        det_secs.append(seconds)
         crops_by_room.append(crops)
     fallback = [len(c) == 0 for c in crops_by_room]
 
@@ -283,10 +307,7 @@ def run_crop_search(
     k_max = max(ks)
 
     def rank(vec: np.ndarray) -> list[str]:
-        sims = gallery @ vec.astype(np.float32)
-        if not np.isfinite(sims).all():
-            raise CropSearchError("similarity vector contains NaN or inf")
-        return [product_ids[j] for j in np.argsort(-sims, kind="stable")]
+        return rank_vector(gallery, product_ids, vec)
 
     ranked_whole: list[list[str]] = []
     ranked_crops: list[list[str]] = []

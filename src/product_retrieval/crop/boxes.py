@@ -18,7 +18,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol
+from typing import IO, Protocol
 
 import numpy as np
 from PIL import Image, ImageOps
@@ -57,13 +57,13 @@ class Detector(Protocol):
     def detect(self, image: Image.Image) -> list[Crop]: ...
 
 
-def load_exif_rgb(path: str | Path) -> Image.Image:
-    """Open an image, apply its EXIF orientation, then convert to RGB (before anything else)."""
+def load_exif_rgb(path: str | Path | IO[bytes]) -> Image.Image:
+    """Open an image (path or binary file), apply its EXIF orientation, then convert to RGB."""
     with Image.open(path) as im:
         return ImageOps.exif_transpose(im).convert("RGB")
 
 
-def exif_orientation(path: str | Path) -> int:
+def exif_orientation(path: str | Path | IO[bytes]) -> int:
     """EXIF orientation tag (1 when absent)."""
     with Image.open(path) as im:
         return int(im.getexif().get(0x0112, 1))
