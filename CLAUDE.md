@@ -1,7 +1,7 @@
 # product-retrieval — 프로젝트 지침
 
 사진 속 상품을 같은·비슷한 상품에 연결하고, 사용자 교정으로 검색 모델을 개선하는 엔진.
-설계 문서: `../storage/product-retrieval/` D17(주제)·D18(JD)·D19(스택·데이터·마일스톤)·D20(소프트웨어 아키텍처).
+설계 문서: `../storage/product-retrieval/` (색인 `README.md`) — `direction/D17`(주제)·`research/D18`(JD)·`design/D19`(스택·데이터·마일스톤)·`design/D20`(소프트웨어 아키텍처)·`research/D22`(로드맵)·`design/D23`(콘솔 플랫폼)·`planning/`(UIUX 기획서).
 
 ## 1. 책임
 - **코드 개발은 Claude가 주도한다.** Codex는 코드를 쓰지 않는다 — 웹 조사, 원인 진단, 코드 리뷰, 설계 반박만 맡는다.
