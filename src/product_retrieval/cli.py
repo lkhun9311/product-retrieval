@@ -13,6 +13,7 @@ from typing import Annotated
 import typer
 
 from product_retrieval import __version__
+from product_retrieval.audit.sample import AuditSampleError, run_audit_sample
 from product_retrieval.core.config import DEFAULT_DATA_ROOT, load_config
 from product_retrieval.core.ids import sha256_file
 from product_retrieval.data.checks import check_manifest
@@ -1053,6 +1054,36 @@ def gate(
         raise typer.Exit(code=1) from exc
     _gate_emit(result, out)
     raise typer.Exit(code=0 if result["decision"] == GATE_PASS else 2)
+
+
+@app.command("audit-sample")
+def audit_sample(
+    manifest: Annotated[
+        Path, typer.Option("--manifest", exists=True, dir_okay=False, help="LRVS manifest JSONL path")
+    ],
+    expect_sha: Annotated[
+        str, typer.Option("--expect-sha", help="expected manifest sha256; refuse if it differs")
+    ],
+    out: Annotated[Path, typer.Option("--out", help="audit sample JSON to write (never overwritten)")],
+    risk_group: Annotated[
+        Path | None,
+        typer.Option(
+            "--risk-group",
+            exists=True,
+            dir_okay=False,
+            help="risk-group product IDs, one per line; without it no fresh sample is drawn",
+        ),
+    ] = None,
+) -> None:
+    """Draw the product-ID audit sample, pilot, re-review sets and display order (ladder step 1)."""
+    try:
+        result = run_audit_sample(manifest, expect_sha, out, risk_group_path=risk_group)
+    except AuditSampleError as exc:
+        typer.echo(f"audit-sample: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+    keys = ("manifest_sha256", "N_h", "n_h", "pilot_h", "sets_sha256", "stage_counts", "fresh_note")
+    summary = {k: result[k] for k in keys}
+    typer.echo(json.dumps(summary, indent=2))
 
 
 @app.command("serve")
