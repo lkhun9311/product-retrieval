@@ -10,6 +10,7 @@ Order of work agreed with Codex Astra (high). One adversarial review (Codex Astr
 - `[V4]` Photo types: worked examples now cover outfits, sets and multipacks, lighting, and logos that only identify a brand.
 - `[V5]` The review export format is fixed now (§7). Truth v2 support in the evaluator moves to its own issue.
 - `[V6]` The pilot starts only after a dry run on non-sample products passes.
+- `[V7]` Made exact from the first sampler run, still before any review: display order per batch, the re-review allocation, the exact stage counts in §8 (v1 approximations were 1,170 · 1,310 · 1,300), and that the fresh sample excludes the risk group.
 
 ## Question
 How often are the LRVS-derived validation labels wrong in ways that change what "the same product" means for retrieval, and how often is the target of a query not identifiable? The answer decides whether the ladder continues on these labels, continues after fixes, needs a target-specification track, or stops.
@@ -42,8 +43,8 @@ How often are the LRVS-derived validation labels wrong in ways that change what 
 | 4 | 2+ gallery (any queries) | 172 | 31 | 11 |
 | | total | 3,243 | 600 | 200 |
 
-- Draw `[R19]`: product IDs sorted as integers; stratum h shuffled with `numpy.random.default_rng([20261031, h])`; the first n_h form the sample, the first pilot_h of those form the pilot. Display order for every stage is a fresh permutation of all items in that stage with `default_rng([20261032, stage])`. The 600 IDs, the 200 pilot IDs and their sha256 are committed before any review.
-- Risk group (up to 40 products, never mixed into any rate): drawn from the 2,643 products **outside** the sample, ranked by highest cross-ID product score (§3 B) and same-normalised-title collisions; reported separately.
+- Draw `[R19]`: product IDs sorted as integers; stratum h shuffled with `numpy.random.default_rng([20261031, h])`; the first n_h form the sample, the first pilot_h of those form the pilot. Display order is a fresh permutation of the items of one stage within one batch, with `default_rng([20261032, stage, batch])`, where batch 0 = pilot and 1 = the remaining 400 `[V7]`. The 600 IDs, the 200 pilot IDs and their sha256 are committed before any review.
+- Risk group (up to 40 products, never mixed into any rate): drawn from the 2,643 products **outside** the sample (fixed before any fresh sample is drawn), ranked by highest cross-ID product score (§3 B) and same-normalised-title collisions; reported separately.
 - No replacement; a product is never swapped because it is hard.
 
 ## 3. Stages — run globally, one stage at a time `[R3]`
@@ -75,8 +76,8 @@ Per sampled product, after all image stages:
 - Secondary, never in F: AMB rate; `unit_mismatch` count; query-level error rate averaged within products; B and D duplicates **found by this procedure** (a discovery count, not a rate); variant pairs; decoys judged same; time per stage.
 
 ## 5. Re-review (one reviewer) `[R14]` `[R15]`
-- **Pilot:** 40 of the 200 (8 per 40 drawn proportionally to strata, seed `[20261033, 1]`), at least 7 days after the pilot's last image stage, new display IDs and order, first judgements hidden. The remaining 400 start **only after** the pilot re-review is analysed.
-- **Full:** 80 more from the 400 (seed `[20261033, 2]`); the full re-review set is these 80 plus the pilot 40.
+- **Pilot:** 40 of the 200, one in five per stratum with largest-remainder rounding (19 · 6 · 13 · 2), seed `[20261033, 1]` `[V7]`, at least 7 days after the pilot's last image stage, new display IDs and order, first judgements hidden. The remaining 400 start **only after** the pilot re-review is analysed.
+- **Full:** 80 more from the 400, allocated to strata in proportion with largest-remainder rounding (38 · 13 · 25 · 4), seed `[20261033, 2]` `[V7]`; the full re-review set is these 80 plus the pilot 40.
 - Disagreement is counted per product (any change in a core relation: same, consistent, variant, different, undecidable, the unit, or the target box/ambiguity) and per judgement; both are reported with the confusion table.
 - Product-level disagreement above 10% in the pilot → stop, fix definitions in a new contract version, re-review all 200. Above 10% in the full set → the full audit cannot pass.
 - Every first and final judgement is kept; re-reviewed products are not given different final rules from the rest.
@@ -92,7 +93,7 @@ Per sampled product, after all image stages:
 | 5 | AMB one-sided 95% upper bound above 10% | the image-only track is evaluated only on target-identified queries; the rest go to a target-specified track (box or category, ladder step 2); both reported |
 | 6 | F lower bound above 5% | hold same-product training and promotion. The report splits ERR from UNR: if confirmed errors dominate, narrow the source, redefine the task or consider another dataset; if unresolved evidence dominates, add views or narrow the evaluation scope first |
 | 7 | F upper bound below 1% | fix every error found, freeze truth v2 with each query's CONS status kept, go to ladder step 2. If F⁺ upper is also below 1%, the result may be called **positively verified**; otherwise it is **verified with compatibility-only references** and the CONS rate is reported with every later result `[V1]` |
-| 8 | otherwise | fix the rules behind confirmed errors (source, variant, mapping), and route unresolved cases to more views or a narrower evaluation scope — compatible pairs need no mapping fix. Write truth v2, then **validate on a fresh sample of 600 products** drawn from the 2,643 not yet sampled, with the same strata design and the interval of §4 computed for that sample `[V2]` (seed `[20261035, h]`, sizes n_h in proportion to the remaining N_h, rounded so they sum to 600), with the same stages; pass = F upper bound below 1% on that sample. The original 600 are never used to confirm their own fixes. |
+| 8 | otherwise | fix the rules behind confirmed errors (source, variant, mapping), and route unresolved cases to more views or a narrower evaluation scope — compatible pairs need no mapping fix. Write truth v2, then **validate on a fresh sample of 600 products** drawn only when this branch fires, from the 2,643 not yet sampled minus the risk group, with the same strata design and the interval of §4 computed for that sample `[V2]` (seed `[20261035, h]`, sizes n_h in proportion to the remaining N_h, rounded so they sum to 600), with the same stages; pass = F upper bound below 1% on that sample. The original 600 are never used to confirm their own fixes. |
 - 1%, 5% and 10% are working thresholds chosen now, not values from literature.
 - Consistent never counts as an error and never as proof: a pass on F alone says nothing about compatibility-only products beyond their reported rate `[V1]`.
 - The pilot alone never passes the audit; it checks procedure, time and definitions. A definition change after the pilot is a new contract version and the 200 are reviewed again.
@@ -106,7 +107,7 @@ Per sampled product, after all image stages:
 - Validation judgements are never used as training labels. The test split stays a regression set; correcting labels does not make it unopened again.
 
 ## 8. Workload `[R18]`
-- Before review the tool reports item counts per stage. For the 600: target ≈ 1,170 queries, C ≈ 1,310 pairs + 1,310 decoys, A ≈ 1,300 within-product pairs, B ≤ 4,800 candidates, D ≤ 3,000 candidates plus pHash hits.
+- Before review the tool reports item counts per stage. For the 600 (computed from the manifest after the draw, before any review `[V7]`): target 1,277 queries, C 1,349 pairs + 1,349 decoys, A 1,385 within-product pairs; pilot 421 · 445 · 445 · 450. B ≤ 4,800 candidates,800 candidates, D ≤ 3,000 candidates plus pHash hits.
 - **Dry run before the pilot `[V6]`:** the review tool runs end to end on 10 products outside the 600 and the risk group. It passes when display IDs, file names and item order reveal neither the product nor the labelled truth, earlier stages are locked when the next opens, a stopped session resumes without losing or repeating a judgement, and the export holds every field above. The pilot starts only after the dry run passes, §1 is confirmed and the sample hashes are committed.
 - The pilot measures seconds per item per stage, counting the whole handling of an item (zooming, viewing every candidate image), not only clicks; the projection includes the re-reviews. If the projected total for the 600 exceeds 40 hours, B and D drop to the top 3 (fixed now as the only fallback), and the coverage note says so. Any other cut makes the audit **incomplete**.
 
