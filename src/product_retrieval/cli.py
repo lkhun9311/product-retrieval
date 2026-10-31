@@ -1065,14 +1065,23 @@ def audit_sample(
         str, typer.Option("--expect-sha", help="expected manifest sha256; refuse if it differs")
     ],
     out: Annotated[Path, typer.Option("--out", help="audit sample JSON to write (never overwritten)")],
+    risk_group: Annotated[
+        Path | None,
+        typer.Option(
+            "--risk-group",
+            exists=True,
+            dir_okay=False,
+            help="risk-group product IDs, one per line; without it no fresh sample is drawn",
+        ),
+    ] = None,
 ) -> None:
     """Draw the product-ID audit sample, pilot, re-review sets and display order (ladder step 1)."""
     try:
-        result = run_audit_sample(manifest, expect_sha, out)
+        result = run_audit_sample(manifest, expect_sha, out, risk_group_path=risk_group)
     except AuditSampleError as exc:
         typer.echo(f"audit-sample: {exc}", err=True)
         raise typer.Exit(code=1) from exc
-    keys = ("manifest_sha256", "N_h", "n_h", "pilot_h", "sets_sha256", "stage_counts")
+    keys = ("manifest_sha256", "N_h", "n_h", "pilot_h", "sets_sha256", "stage_counts", "fresh_note")
     summary = {k: result[k] for k in keys}
     typer.echo(json.dumps(summary, indent=2))
 
