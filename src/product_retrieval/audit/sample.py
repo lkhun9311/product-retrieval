@@ -8,14 +8,18 @@ TODO (not in this piece): item counts for stage B (across validation IDs) and st
 (train-validation) need frozen SigLIP2 product scores and pHash hits; the decoy pairs of
 stage C also need product scores (only the number of decoy slots is counted here).
 
-Choices the contract leaves open (reported, not silently decided):
-- ``rereview_pilot`` and ``rereview_full`` allocate over strata proportionally with largest
-  remainder (ties go to the lower stratum); the contract only says "proportionally" for the
-  pilot 40, and says nothing about strata for the 80.
-- Within a stratum the re-review draw takes the first k of a permutation of the candidate IDs
-  (sorted as integers); one generator per draw is used across strata in order h = 1..4.
-- Display order is drawn over the items of the 600, not per pilot/rest batch.
-- Products with no query or no gallery image fit no stratum and are an error.
+Contract wording followed (section 5, ``[V7]``): the pilot re-review takes 40 of the 200, "one in
+five per stratum with largest-remainder rounding (19 . 6 . 13 . 2)"; the full re-review takes 80 more
+from the 400, "allocated to strata in proportion with largest-remainder rounding (38 . 13 . 25 . 4)".
+Display order (section 2, ``[V7]``) is one permutation per stage within one batch, seed
+``[20261032, stage, batch]``, batch 0 = pilot, batch 1 = the remaining 400.
+
+Left to the code, not the contract: ties in rounding go to the lower stratum; within a stratum the
+re-review draw takes the first k of a permutation of the candidate IDs (sorted as integers), one
+generator per draw used across strata in order h = 1..4; a product with no query or no gallery
+image fits no stratum and is an error.
+
+The fresh sample (section 6, branch 8) is drawn only when a risk-group file is given.
 """
 
 from __future__ import annotations
@@ -215,13 +219,14 @@ def stage_items(rows: Sequence[ManifestRow], product_ids: Sequence[str]) -> dict
     return {1: target, 2: c_items, 3: a_items}
 
 
-def display_plan(items: Sequence[tuple], stage: int) -> list[tuple[str, tuple]]:
-    """Opaque display order for one stage: ``[(display_id, item)]`` in display order.
+def display_plan(items: Sequence[tuple], stage: int, batch: int) -> list[tuple[str, tuple]]:
+    """Opaque display order for one stage of one batch: ``[(display_id, item)]`` in display order.
 
-    The permutation and the tokens both come from ``default_rng([20261032, stage])``; tokens are
+    The permutation and the tokens both come from ``default_rng([20261032, stage, batch])`` (batch 0 =
+    pilot, 1 = the remaining 400), so pilot items never interleave with the others; tokens are
     random 64-bit values, unrelated to product IDs, item order or the sort order of the IDs.
     """
-    rng = np.random.default_rng([DISPLAY_SEED, stage])
+    rng = np.random.default_rng([DISPLAY_SEED, stage, batch])
     order = rng.permutation(len(items))
     tokens: list[str] = []
     used: set[str] = set()
@@ -238,13 +243,35 @@ def ids_sha256(ids: Sequence[str]) -> str:
     return sha256_bytes(canonical_json(list(ids)).encode("utf-8"))
 
 
+def read_risk_group(path: str | Path, rows: Sequence[ManifestRow], sampled: Sequence[str]) -> list[str]:
+    """Read a risk-group file (one product ID per line); IDs must be val products outside the sample."""
+    ids = [line.strip() for line in Path(path).read_text(encoding="utf-8").splitlines() if line.strip()]
+    if not ids:
+        raise AuditSampleError(f"risk-group file {path} is empty")
+    if len(set(ids)) != len(ids):
+        raise AuditSampleError("risk-group file repeats a product ID")
+    known = {r.product_id for r in rows}
+    unknown = [i for i in ids if i not in known]
+    if unknown:
+        raise AuditSampleError(f"risk-group IDs not in split val: {unknown[:5]}")
+    inside = sorted(set(ids) & set(sampled))
+    if inside:
+        raise AuditSampleError(f"risk-group IDs inside the audit sample: {inside[:5]}")
+    return ids
+
+
 def run_audit_sample(
     manifest_path: str | Path,
     expect_sha: str,
     out: str | Path,
     design: AuditDesign = DEFAULT_DESIGN,
+    risk_group_path: str | Path | None = None,
 ) -> dict[str, Any]:
-    """Draw everything and write the JSON to ``out`` (refuses to overwrite)."""
+    """Draw everything and write the JSON to ``out`` (refuses to overwrite).
+
+    The fresh sample is drawn only when ``risk_group_path`` is given (one product ID per line);
+    otherwise it is left out and the JSON says so.
+    """
     actual = manifest_sha(manifest_path)
     if actual != expect_sha:
         raise AuditSampleError(f"manifest sha256 {actual} differs from expected {expect_sha}")
@@ -257,19 +284,32 @@ def run_audit_sample(
     sample, pilot, n_h = draw_sample(rows, design)
     rr_pilot, rr_extra = draw_rereview(sample, pilot, design)
     sample_ids, pilot_ids = _flat(sample), _flat(pilot)
-    fresh = draw_fresh(rows, sample_ids, design)
     sets = {
         "sample": sample_ids,
         "pilot": pilot_ids,
         "rereview_pilot": _flat(rr_pilot),
         "rereview_extra": _flat(rr_extra),
-        "fresh": _flat(fresh),
     }
-    display: dict[str, list[dict[str, Any]]] = {}
-    for stage, items in stage_items(rows, sample_ids).items():
-        display[STAGES[stage]] = [
-            {"display_id": d, "item": list(item)} for d, item in display_plan(items, stage)
-        ]
+    fresh_note = "not drawn: branch 8 needs a risk-group file (--risk-group)"
+    risk_ids: list[str] = []
+    if risk_group_path is not None:
+        risk_ids = read_risk_group(risk_group_path, rows, sample_ids)
+        sets["fresh"] = _flat(draw_fresh(rows, sample_ids, design, risk_group=risk_ids))
+        fresh_note = f"drawn from the population minus the sample and {len(risk_ids)} risk-group products"
+    pilot_set = set(pilot_ids)
+    rest_ids = [i for i in sample_ids if i not in pilot_set]
+    display: dict[str, dict[str, list[dict[str, Any]]]] = {}
+    seen_tokens: set[str] = set()
+    for batch, name, ids in ((0, "pilot", pilot_ids), (1, "rest", rest_ids)):
+        for stage, items in stage_items(rows, ids).items():
+            plan = display_plan(items, stage, batch)
+            for d, _ in plan:
+                if d in seen_tokens:
+                    raise AuditSampleError(f"display id {d} repeats across batches")
+                seen_tokens.add(d)
+            display.setdefault(STAGES[stage], {})[name] = [
+                {"display_id": d, "item": list(item)} for d, item in plan
+            ]
     result = {
         "contract": CONTRACT_VERSION,
         "manifest_sha256": actual,
@@ -279,7 +319,7 @@ def run_audit_sample(
         "pilot_h": {str(h): len(pilot[h]) for h in STRATA},
         "seeds": {
             "sample": [SAMPLE_SEED, "h"],
-            "display": [DISPLAY_SEED, "stage"],
+            "display": [DISPLAY_SEED, "stage", "batch"],
             "rereview_pilot": [REREVIEW_SEED, 1],
             "rereview_extra": [REREVIEW_SEED, 2],
             "fresh": [FRESH_SEED, "h"],
@@ -289,7 +329,10 @@ def run_audit_sample(
         "stage_counts": {
             "sample": stage_counts(rows, sample_ids),
             "pilot": stage_counts(rows, pilot_ids),
+            "rest": stage_counts(rows, rest_ids),
         },
+        "fresh_note": fresh_note,
+        "risk_group_sha256": ids_sha256(risk_ids) if risk_group_path is not None else None,
         "display": display,
     }
     out.parent.mkdir(parents=True, exist_ok=True)

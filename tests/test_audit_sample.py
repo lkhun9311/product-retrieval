@@ -248,7 +248,7 @@ def test_display_ids_opaque():
     ids = [r.product_id for r in rows]
     items = stage_items(rows, ids)
     for stage in (1, 2, 3):
-        plan = display_plan(items[stage], stage)
+        plan = display_plan(items[stage], stage, 0)
         assert len(plan) == len(items[stage])
         assert sorted(map(repr, (i for _, i in plan))) == sorted(map(repr, items[stage]))
         shown = [d for d, _ in plan]
@@ -258,14 +258,14 @@ def test_display_ids_opaque():
         # item order is not product order; display ids sorted do not give display order
         assert [i for _, i in plan] != items[stage]
         assert shown != sorted(shown)
-        assert display_plan(items[stage], stage) == plan
-    assert display_plan(items[1], 1) != display_plan(items[1], 2)
+        assert display_plan(items[stage], stage, 0) == plan
+    assert display_plan(items[1], 1, 0) != display_plan(items[1], 2, 0)
 
 
 def test_display_order_is_not_product_order_or_its_reverse():
     rows = _val(_make_rows())
     items = stage_items(rows, [r.product_id for r in rows])[1]
-    shown = [i for _, i in display_plan(items, 1)]
+    shown = [i for _, i in display_plan(items, 1, 0)]
     assert shown != items and shown != items[::-1]
     # product ids ascend along the input; along the display they do not
     pos = {i: k for k, i in enumerate(shown)}
@@ -273,7 +273,7 @@ def test_display_order_is_not_product_order_or_its_reverse():
 
 
 def test_display_empty_stage():
-    assert display_plan([], 1) == []
+    assert display_plan([], 1, 0) == []
 
 
 def test_run_writes_output_and_hashes(tmp_path):
@@ -287,9 +287,12 @@ def test_run_writes_output_and_hashes(tmp_path):
     assert data["sets_sha256"]["sample"] == ids_sha256(data["sets"]["sample"])
     assert len(data["sets"]["sample"]) == 20 and len(data["sets"]["pilot"]) == 10
     assert set(data["sets"]["pilot"]) <= set(data["sets"]["sample"])
-    assert not set(data["sets"]["fresh"]) & set(data["sets"]["sample"])
-    assert data["stage_counts"]["sample"]["target"] == len(data["display"]["target"])
-    assert data["stage_counts"]["sample"]["C_pairs"] * 2 == len(data["display"]["C"])
+    assert "fresh" not in data["sets"] and "fresh" not in data["sets_sha256"]
+    assert "not drawn" in data["fresh_note"] and data["risk_group_sha256"] is None
+    for batch, key in (("pilot", "pilot"), ("rest", "rest")):
+        assert data["stage_counts"][key]["target"] == len(data["display"]["target"][batch])
+        assert data["stage_counts"][key]["C_pairs"] * 2 == len(data["display"]["C"][batch])
+        assert data["stage_counts"][key]["A_pairs"] == len(data["display"]["A"][batch])
     assert result["sets"] == data["sets"]
     # same inputs, same bytes
     out2 = tmp_path / "audit2.json"
@@ -343,3 +346,116 @@ def test_train_products_are_not_sampled(tmp_path):
     data = run_audit_sample(path, sha256_file(path), tmp_path / "o.json", DESIGN)
     assert "5" not in data["sets"]["sample"]
     assert len(load_manifest(path)) == 101
+
+
+def test_display_batches_never_interleave_and_differ():
+    rows = _val(_make_rows())
+    sample, pilot, _ = draw_sample(rows, DESIGN)
+    pilot_ids = _flat(pilot)
+    rest_ids = [i for i in _flat(sample) if i not in set(pilot_ids)]
+    for stage in (1, 2, 3):
+        p_items = stage_items(rows, pilot_ids)[stage]
+        r_items = stage_items(rows, rest_ids)[stage]
+        p_plan = display_plan(p_items, stage, 0)
+        r_plan = display_plan(r_items, stage, 1)
+        real = lambda plan: {i for _, i in plan if i[0] != "decoy"}  # noqa: E731
+        assert real(p_plan).isdisjoint(real(r_plan))
+        assert not {d for d, _ in p_plan} & {d for d, _ in r_plan}
+        assert display_plan(p_items, stage, 0) != display_plan(p_items, stage, 1)
+
+
+def test_run_display_has_separate_batches(tmp_path):
+    path = _write(tmp_path, _make_rows())
+    data = run_audit_sample(path, sha256_file(path), tmp_path / "o.json", DESIGN)
+    for stage in ("target", "C", "A"):
+        p = {e["display_id"] for e in data["display"][stage]["pilot"]}
+        r = {e["display_id"] for e in data["display"][stage]["rest"]}
+        assert p and r and not p & r
+        keys_p = {tuple(e["item"]) for e in data["display"][stage]["pilot"] if e["item"][0] != "decoy"}
+        keys_r = {tuple(e["item"]) for e in data["display"][stage]["rest"] if e["item"][0] != "decoy"}
+        assert not keys_p & keys_r
+
+
+def _risk_file(tmp_path, rows, sample_ids, k=5, name="risk.txt"):
+    ids = [r.product_id for r in rows if r.product_id not in set(sample_ids)][:k]
+    path = tmp_path / name
+    path.write_text("\n".join(ids) + "\n")
+    return path, ids
+
+
+def test_fresh_drawn_only_with_risk_group(tmp_path):
+    rows_raw = _make_rows()
+    path = _write(tmp_path, rows_raw)
+    sha = sha256_file(path)
+    sample, _, _ = draw_sample(_val(rows_raw), DESIGN)
+    risk_path, risk = _risk_file(tmp_path, _val(rows_raw), _flat(sample))
+    data = run_audit_sample(path, sha, tmp_path / "o.json", DESIGN, risk_group_path=risk_path)
+    fresh = data["sets"]["fresh"]
+    assert len(fresh) == 20
+    assert not set(fresh) & (set(data["sets"]["sample"]) | set(risk))
+    assert data["sets_sha256"]["fresh"] == ids_sha256(fresh)
+    assert data["risk_group_sha256"] == ids_sha256(risk)
+    assert "risk-group" in data["fresh_note"]
+
+
+def test_cli_risk_group_flag(tmp_path):
+    rows_raw = _make_rows()
+    path = _write(tmp_path, rows_raw)
+    sha = sha256_file(path)
+    # the CLI uses the contract design, so a synthetic manifest is rejected before the flag matters
+    risk_path, _ = _risk_file(tmp_path, _val(rows_raw), [])
+    res = runner.invoke(
+        app,
+        [
+            "audit-sample",
+            "--manifest",
+            str(path),
+            "--expect-sha",
+            sha,
+            "--out",
+            str(tmp_path / "o.json"),
+            "--risk-group",
+            str(risk_path),
+        ],
+    )
+    assert res.exit_code == 1 and "differ from expected" in res.output
+    res = runner.invoke(
+        app,
+        [
+            "audit-sample",
+            "--manifest",
+            str(path),
+            "--expect-sha",
+            sha,
+            "--out",
+            str(tmp_path / "o.json"),
+            "--risk-group",
+            str(tmp_path / "missing.txt"),
+        ],
+    )
+    assert res.exit_code != 0
+
+
+def test_risk_group_file_failures(tmp_path):
+    rows_raw = _make_rows()
+    path = _write(tmp_path, rows_raw)
+    sha = sha256_file(path)
+    rows = _val(rows_raw)
+    sample, _, _ = draw_sample(rows, DESIGN)
+    sampled = _flat(sample)
+
+    def run(lines, name):
+        f = tmp_path / f"{name}.txt"
+        f.write_text("\n".join(lines))
+        return run_audit_sample(path, sha, tmp_path / f"{name}.json", DESIGN, risk_group_path=f)
+
+    outside = [r.product_id for r in rows if r.product_id not in set(sampled)]
+    with pytest.raises(AuditSampleError, match="empty"):
+        run([], "empty")
+    with pytest.raises(AuditSampleError, match="inside the audit sample"):
+        run([sampled[0]], "inside")
+    with pytest.raises(AuditSampleError, match="not in split val"):
+        run(["5"], "train")  # a train product
+    with pytest.raises(AuditSampleError, match="repeats"):
+        run([outside[0], outside[0]], "dup")
+    assert not list(tmp_path.glob("empty.json")) + list(tmp_path.glob("inside.json"))
